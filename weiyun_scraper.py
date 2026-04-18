@@ -183,23 +183,52 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
                 pass
 
         # ── 3. 找输入框并填入船名 ─────────────────────────────────────
-        # placeholder = "请输入英文船名/IMO/MMSI，无需输入符号及航次"
-        _jitter(0.8, 1.2)
+        _jitter(1.5, 2.5)
+
+        # 先列出页面上所有输入框，帮助定位正确元素
+        all_inputs = page.run_js("""
+            return JSON.stringify(Array.from(document.querySelectorAll('input')).map(el => ({
+                ph:   el.placeholder,
+                type: el.type,
+                id:   el.id,
+                cls:  el.className.slice(0, 60)
+            })));
+        """)
+        log.info(f"  页面输入框列表: {all_inputs}")
+
+        # 优先找 placeholder 含船舶相关关键词的输入框（排除全局搜索栏）
         search_box = None
-        for sel in [
-            "xpath://input[contains(@placeholder,'英文船名')]",
-            "xpath://input[contains(@placeholder,'MMSI')]",
-            "xpath://input[contains(@placeholder,'IMO')]",
-            "tag:input@type=text",
-        ]:
+        kw_list = ["英文船名", "MMSI", "船名", "IMO/MMSI", "船舶"]
+        for kw in kw_list:
             try:
-                el = page.ele(sel, timeout=5)
+                el = page.ele(f"xpath://input[contains(@placeholder,'{kw}')]", timeout=3)
                 if el:
                     search_box = el
-                    log.info(f"  找到输入框: {el.attr('placeholder')!r}")
+                    log.info(f"  找到船舶定位输入框: {el.attr('placeholder')!r}")
                     break
             except Exception:
                 continue
+
+        # 兜底：找所有可见输入框，跳过 placeholder 含「搜索内容/搜索网站」的全局搜索栏
+        if not search_box:
+            for inp in page.eles("tag:input"):
+                try:
+                    ph = inp.attr("placeholder") or ""
+                    t  = (inp.attr("type") or "text").lower()
+                    if t in ("hidden", "password", "submit", "button", "file"):
+                        continue
+                    if any(x in ph for x in ["搜索内容", "搜索网站", "搜索关键"]):
+                        continue          # 跳过顶部全局搜索栏
+                    visible = page.run_js("""
+                        const r = arguments[0].getBoundingClientRect();
+                        return r.width > 100 && r.height > 0;
+                    """, inp)
+                    if visible:
+                        search_box = inp
+                        log.info(f"  兜底找到输入框: {ph!r}")
+                        break
+                except Exception:
+                    continue
 
         if not search_box:
             log.warning(f"[{ship_name}] 未找到搜索输入框 → 截图")
