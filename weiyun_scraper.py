@@ -5,7 +5,7 @@
 
 启动方式（推荐方式一）：
   1. 用调试端口打开 Chrome，登录 weiyun001.com：
-       chrome.exe --remote-debugging-port=9222 --user-data-dir=C:\chrome_debug
+       chrome.exe --remote-debugging-port=9222 --user-data-dir=C:/chrome_debug
   2. 运行：
        python weiyun_scraper.py -s RABAUL CHIEF --port 9222
 
@@ -419,7 +419,7 @@ def main():
                 log.error(
                     "未找到 Chrome 调试端口（9222-9230）。\n"
                     "请用以下命令重新打开 Chrome：\n"
-                    "  chrome.exe --remote-debugging-port=9222 --user-data-dir=C:\\chrome_debug\n"
+                    "  chrome.exe --remote-debugging-port=9222 --user-data-dir=C:/chrome_debug\n"
                     "然后在 Chrome 里登录网站，再运行脚本。"
                 )
                 return
