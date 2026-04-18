@@ -370,6 +370,10 @@ def _launch_chrome(port: int = DEBUG_PORT) -> bool:
         f"--remote-debugging-port={port}",
         f"--user-data-dir={DEBUG_DIR}",
         "--disable-blink-features=AutomationControlled",
+        "--no-first-run",               # 不显示"欢迎使用 Chrome"
+        "--no-default-browser-check",   # 不提示设为默认浏览器
+        "--disable-sync",               # 禁用 Google 账号同步提示
+        "--disable-extensions",         # 不加载扩展（加速启动）
         SITE,   # 直接打开维运网
     ])
 
