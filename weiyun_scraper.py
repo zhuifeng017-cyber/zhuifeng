@@ -49,10 +49,21 @@ def _jitter(lo: float = 1.0, hi: float = 2.5):
 
 
 def _human_type(ele, text: str):
-    ele.clear()
+    ele.click()
+    time.sleep(0.3)
+    # 先用 JS 清空并触发 Vue 的 input 事件，避免 clear() 不触发响应式更新
+    ele.run_js("""
+        this.value = '';
+        this.dispatchEvent(new Event('input', {bubbles: true}));
+        this.dispatchEvent(new Event('change', {bubbles: true}));
+    """)
+    time.sleep(0.2)
     for ch in text:
         ele.input(ch)
-        time.sleep(random.uniform(0.05, 0.13))
+        time.sleep(random.uniform(0.06, 0.12))
+    # 输入完成后再触发一次，确保 Vue 双向绑定同步
+    ele.run_js("this.dispatchEvent(new Event('input', {bubbles: true}));")
+    time.sleep(0.2)
 
 
 def _wait_for_url(page: ChromiumPage, keyword: str, timeout: float = 20.0) -> bool:
@@ -193,26 +204,41 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
             record["status"] = "no_search_box"
             return record
 
-        search_box.click()
         _human_type(search_box, ship_name.upper())
         _jitter(0.8, 1.2)
 
-        # ── 4. 点击「搜索」按钮 ───────────────────────────────────────
-        clicked_btn = False
-        for sel in ["xpath://button[contains(.,'搜索')]", "tag:button@@text():搜索"]:
-            try:
-                btn = page.ele(sel, timeout=3)
-                if btn:
-                    btn.click()
-                    clicked_btn = True
-                    log.info("  点击「搜索」按钮")
-                    break
-            except Exception:
-                continue
-        if not clicked_btn:
+        # 确认输入框里有值再搜索
+        cur_val = search_box.run_js("return this.value")
+        log.info(f"  输入框当前值: {cur_val!r}")
+
+        # ── 4. 点击搜索按钮（图标按钮，无文字）──────────────────────────
+        # 用 JS 找 input 的下一个兄弟 button 或父级里的 button
+        clicked_btn = page.run_js("""
+            const inp = arguments[0];
+            // 先找同级 button（input 之后）
+            let sib = inp.nextElementSibling;
+            while (sib) {
+                if (sib.tagName === 'BUTTON') { sib.click(); return sib.className || 'button'; }
+                sib = sib.nextElementSibling;
+            }
+            // 再向上找父级里的 button
+            let node = inp.parentElement;
+            for (let i = 0; i < 5; i++) {
+                if (!node) break;
+                const btn = node.querySelector('button');
+                if (btn) { btn.click(); return btn.className || 'button'; }
+                node = node.parentElement;
+            }
+            return null;
+        """, search_box)
+
+        if clicked_btn:
+            log.info(f"  点击搜索按钮: {clicked_btn!r}")
+        else:
+            # 兜底：Enter 键
             search_box.run_js("""
                 this.dispatchEvent(new KeyboardEvent('keydown',
-                    {key:'Enter',keyCode:13,bubbles:true,cancelable:true}));
+                    {key:'Enter', keyCode:13, bubbles:true, cancelable:true}));
             """)
             log.info("  JS Enter 兜底")
 
