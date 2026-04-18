@@ -227,7 +227,7 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
             return record
 
         log.info(f"  已到达: {page.url}")
-        page.wait.load()        # 等待页面完全渲染
+        _jitter(1.5, 2.5)       # 等待页面完全渲染
         _jitter(1.0, 2.0)
 
         # ── 6. 提取字段 ───────────────────────────────────────────────
