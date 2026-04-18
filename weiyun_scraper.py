@@ -166,47 +166,60 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
         _human_type(search_box, ship_name.upper())
         _jitter(1.0, 2.0)   # 等待自动补全出现
 
-        # ── 4. 点击自动补全第一条 ─────────────────────────────────────
-        # 点击后网站会跳转到 /shipLocate?vn=...&imo=...&t=...
-        clicked = False
-        for sel in [
-            ".autocomplete-item",
-            ".suggestion-item",
-            ".search-result-item",
-            ".search-dropdown li",
-            ".dropdown-menu li",
-            f"tag:li@@text():{ship_name.upper()}",
-            "tag:li",           # 兜底：下拉里第一个 li
-        ]:
-            try:
-                el = page.ele(sel, timeout=3)
-                if el:
-                    el.click()
-                    clicked = True
-                    log.info(f"  点击补全项: {el.text[:40]!r}")
-                    break
-            except Exception:
-                continue
+        # ── 4. 触发自动补全并选择第一条 ──────────────────────────────
+        # 截图：看输入后页面上出现了什么
+        page.get_screenshot(path=f"debug_{ship_name}_after_type.png")
 
-        if not clicked:
-            # 没有补全就直接回车，走搜索结果页再点第一条
-            search_box.input("\n")
-            _jitter(2.0, 3.0)
+        # 策略A：用键盘 ↓ 键选中补全第一项，再回车确认
+        # 适用于大多数基于 input 的自动补全组件
+        try:
+            page.actions.key_down("ArrowDown").key_up("ArrowDown")
+            time.sleep(0.4)
+            page.actions.key_down("Return").key_up("Return")
+            log.info("  已用键盘 ↓+Enter 选中补全项")
+        except Exception as e:
+            log.debug(f"  键盘导航失败: {e}")
 
+        _jitter(1.5, 2.5)
+
+        # 如果键盘没触发跳转，再尝试点击具体的补全条目
+        if "shipLocate" not in page.url:
+            clicked = False
             for sel in [
-                ".search-result-item", ".result-item",
-                ".ship-item", ".vessel-item",
-                "tag:li@@text():ship",
-                ".list-item",
+                ".autocomplete-item",
+                ".suggestion-item",
+                ".search-result-item",
+                ".search-dropdown li",
+                ".dropdown-menu li",
+                f"tag:li@@text():{ship_name.upper()}",
             ]:
                 try:
-                    el = page.ele(sel, timeout=4)
-                    if el:
+                    el = page.ele(sel, timeout=2)
+                    if el and el.text.strip():
                         el.click()
-                        log.info(f"  点击搜索结果: {el.text[:40]!r}")
+                        clicked = True
+                        log.info(f"  点击补全项: {el.text[:40]!r}")
                         break
                 except Exception:
                     continue
+
+            if not clicked:
+                log.info("  未找到补全项，回车提交搜索...")
+                search_box.input("\n")
+                _jitter(2.0, 3.0)
+                # 搜索结果页点第一条
+                for sel in [
+                    ".search-result-item", ".result-item",
+                    ".ship-item", ".vessel-item", ".list-item",
+                ]:
+                    try:
+                        el = page.ele(sel, timeout=4)
+                        if el and el.text.strip():
+                            el.click()
+                            log.info(f"  点击搜索结果: {el.text[:40]!r}")
+                            break
+                    except Exception:
+                        continue
 
         # ── 5. 等待跳转到 shipLocate 页面 ────────────────────────────
         log.info(f"  等待跳转 shipLocate 页面（最多 20s）...")
