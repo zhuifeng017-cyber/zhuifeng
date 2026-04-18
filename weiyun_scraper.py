@@ -183,61 +183,53 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
 
         # ── 4. 在船舶定位面板里找输入框并输入船名 ────────────────────
         # 船舶定位面板的输入框 placeholder 通常含"船名/IMO/呼号"等
-        # ── 4. 在船舶定位面板里找输入框 ──────────────────────────────
-        # 不靠 placeholder 猜测，用 JS 扫所有可见文本输入框
+        # ── 4. 在船舶定位面板里找输入框并填入船名 ──────────────────────
+        # 船舶定位的输入框 placeholder = "请输入英文船名/IMO/MMSI，无需输入符号及航次"
         _jitter(1.0, 1.5)
         search_box = None
-        skip_types = {"hidden", "password", "checkbox", "radio", "submit", "button", "file", "image"}
-
-        for inp in page.eles("tag:input"):
+        for sel in [
+            "tag:input@placeholder:英文船名",   # 精确匹配 placeholder 关键字
+            "tag:input@placeholder:MMSI",
+            "tag:input@placeholder:IMO",
+        ]:
             try:
-                if (inp.attr("type") or "text").lower() in skip_types:
-                    continue
-                visible = page.run_js("""
-                    const r = arguments[0].getBoundingClientRect();
-                    const s = window.getComputedStyle(arguments[0]);
-                    return r.width > 30 && r.height > 0
-                        && s.display !== 'none' && s.visibility !== 'hidden';
-                """, inp)
-                if visible:
-                    ph = inp.attr("placeholder") or ""
-                    log.info(f"  找到可见输入框: placeholder={ph!r}  id={inp.attr('id')!r}")
-                    search_box = inp
+                el = page.ele(sel, timeout=5)
+                if el:
+                    search_box = el
+                    log.info(f"  找到船舶定位输入框: {el.attr('placeholder')!r}")
                     break
             except Exception:
                 continue
 
         if not search_box:
-            log.warning(f"[{ship_name}] 未找到可见输入框 → 截图")
+            log.warning(f"[{ship_name}] 未找到船舶定位输入框 → 截图")
             page.get_screenshot(path=f"debug_{ship_name}.png", full_page=True)
             record["status"] = "no_search_box"
             return record
 
         search_box.click()
         _human_type(search_box, ship_name.upper())
-        _jitter(1.0, 1.5)
+        _jitter(0.8, 1.2)
 
-        # ── 5. 点击搜索按钮 ───────────────────────────────────────────
-        clicked_btn = page.run_js("""
-            const inp = arguments[0];
-            let node = inp.parentElement;
-            for (let i = 0; i < 6; i++) {
-                if (!node) break;
-                const btn = node.querySelector('button');
-                if (btn) { btn.click(); return btn.innerText.trim() || btn.className; }
-                node = node.parentElement;
-            }
-            return null;
-        """, search_box)
-
-        if clicked_btn:
-            log.info(f"  点击搜索按钮: {clicked_btn!r}")
-        else:
+        # ── 5. 点击「搜索」按钮 ───────────────────────────────────────
+        # 船舶定位面板的搜索按钮文字就是「搜索」
+        clicked_btn = False
+        for sel in ["tag:button@@text():搜索", "xpath://button[contains(.,'搜索')]"]:
+            try:
+                btn = page.ele(sel, timeout=3)
+                if btn:
+                    btn.click()
+                    clicked_btn = True
+                    log.info("  点击「搜索」按钮")
+                    break
+            except Exception:
+                continue
+        if not clicked_btn:
             search_box.run_js("""
                 this.dispatchEvent(new KeyboardEvent('keydown',
                     {key:'Enter',keyCode:13,bubbles:true,cancelable:true}));
             """)
-            log.info("  JS dispatch Enter 兜底")
+            log.info("  JS Enter 兜底")
 
         # ── 6. 等待跳转到 shipLocate 页面 ────────────────────────────
         log.info(f"  等待跳转 shipLocate 页面（最多 20s）...")
