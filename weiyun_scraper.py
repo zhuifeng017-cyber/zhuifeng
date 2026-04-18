@@ -275,14 +275,20 @@ def _ensure_logged_in(page: ChromiumPage):
     page.get(SITE, timeout=30)
     _jitter(1.5, 2.5)
 
+    # @@text() = 包含匹配；页面上显示的是「登录/注册」「登录查看」等
     not_logged_in_signs = [
-        "tag:a@text():登录", "tag:a@text():注册",
-        "tag:button@text():登录", ".login-btn", "#loginBtn",
+        "tag:a@@text():登录",
+        "tag:span@@text():登录",
+        "tag:button@@text():登录",
+        "tag:div@@text():登录查看",
+        ".login-btn", "#loginBtn",
     ]
     needs_login = False
     for sel in not_logged_in_signs:
         try:
-            if page.ele(sel, timeout=2):
+            el = page.ele(sel, timeout=2)
+            if el:
+                log.info(f"  检测到未登录元素: {el.text[:30]!r}")
                 needs_login = True
                 break
         except Exception:
@@ -297,7 +303,7 @@ def _ensure_logged_in(page: ChromiumPage):
         page.refresh()
         _jitter(1.0, 2.0)
     else:
-        log.info("已登录，开始抓取。")
+        log.info("登录状态确认，开始抓取。")
 
 
 # ---------------------------------------------------------------------------
