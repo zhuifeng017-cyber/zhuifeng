@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
 """
-维运网船舶信息爬虫 (DrissionPage 版)
-提取：船长、船宽、船型、吃水
+维运网船舶信息爬虫
+流程：搜索船名 → 点击结果 → 跳转 /shipLocate 页面 → 提取船长/船宽/船型/吃水
 
-两种启动方式（推荐方式一）：
-
-【方式一】接管已登录的 Chrome（最稳定）
-  1. 用调试端口启动 Chrome（只需做一次，或加到 Chrome 快捷方式）：
-       chrome.exe --remote-debugging-port=9222 --user-data-dir=C:/chrome_debug
-  2. 在打开的 Chrome 里登录 weiyun001.com
-  3. 运行脚本：
+启动方式（推荐方式一）：
+  1. 用调试端口打开 Chrome，登录 weiyun001.com：
+       chrome.exe --remote-debugging-port=9222 --user-data-dir=C:\chrome_debug
+  2. 运行：
        python weiyun_scraper.py -s RABAUL CHIEF --port 9222
 
-【方式二】脚本自己开 Chrome，自动检测登录状态后暂停让你手动登录
+  方式二（脚本自己开 Chrome，自动暂停让你登录）：
        python weiyun_scraper.py -s RABAUL CHIEF
-       # 浏览器打开后，手动登录，登录完按终端回车继续
 
-其他用法:
-    python weiyun_scraper.py input.xlsx -c 英文船名  # 从 Excel 批量跑
-    python weiyun_scraper.py --gen-sample            # 生成示例输入
+  从 Excel 批量跑：
+       python weiyun_scraper.py input.xlsx -c 英文船名 --port 9222
 """
 
 import argparse
@@ -39,22 +34,13 @@ logging.basicConfig(
 
 SITE = "https://www.weiyun001.com"
 TARGET_FIELDS = ["船长", "船宽", "船型", "吃水"]
-LISTEN_KEYWORD = "shipLocate"
-
-FIELD_MAP = {
-    "船长": ["length", "shipLength", "loa", "chuanChang", "船长"],
-    "船宽": ["width", "beam", "shipWidth", "chuanKuan", "船宽"],
-    "船型": ["type", "shipType", "vesselType", "chuanXing", "船型"],
-    "吃水": ["draft", "draught", "chiShui", "吃水"],
-    "IMO":  ["imo", "imoNo", "imoNumber"],
-}
 
 
 # ---------------------------------------------------------------------------
-# 工具函数
+# 工具
 # ---------------------------------------------------------------------------
 
-def _jitter(lo: float = 1.5, hi: float = 3.5):
+def _jitter(lo: float = 1.0, hi: float = 2.5):
     time.sleep(random.uniform(lo, hi))
 
 
@@ -65,132 +51,80 @@ def _human_type(ele, text: str):
         time.sleep(random.uniform(0.05, 0.13))
 
 
-def _flatten(obj, prefix: str = "") -> dict:
-    items: dict = {}
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            items.update(_flatten(v, f"{prefix}.{k}" if prefix else k))
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj[:20]):
-            items.update(_flatten(v, f"{prefix}[{i}]"))
-    else:
-        items[prefix] = obj
-    return items
+def _wait_for_url(page: ChromiumPage, keyword: str, timeout: float = 20.0) -> bool:
+    """等待页面 URL 中出现指定关键字，返回是否成功。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if keyword in page.url:
+            return True
+        time.sleep(0.4)
+    return False
 
 
-def _parse_api_body(body) -> dict:
-    if not isinstance(body, (dict, list)):
-        return {}
-    flat = _flatten(body)
+# ---------------------------------------------------------------------------
+# 从 shipLocate 页面提取字段
+# ---------------------------------------------------------------------------
+
+def _extract_fields(page: ChromiumPage) -> dict:
+    """
+    从已加载的 shipLocate 页面提取目标字段。
+    策略1：JS TreeWalker 找标签文字，取其相邻节点值。
+    策略2：XPath 找标签后的兄弟元素。
+    """
     result: dict = {}
-    for field, keys in FIELD_MAP.items():
-        for k, v in flat.items():
-            if v and any(key.lower() in k.lower() for key in keys):
-                result[field] = str(v)
-                break
+
+    for field in TARGET_FIELDS + ["IMO"]:
+        # 策略 1：TreeWalker
+        try:
+            val = page.run_js(
+                """(field) => {
+                    const walker = document.createTreeWalker(
+                        document.body, NodeFilter.SHOW_TEXT);
+                    let node;
+                    while ((node = walker.nextNode())) {
+                        const txt = node.textContent.trim();
+                        if (txt === field || txt === field + ':' || txt === field + '：') {
+                            // 尝试父元素的下一兄弟
+                            const par = node.parentElement;
+                            if (par.nextElementSibling)
+                                return par.nextElementSibling.innerText.trim();
+                            // 尝试祖父元素的下一兄弟
+                            if (par.parentElement?.nextElementSibling)
+                                return par.parentElement.nextElementSibling.innerText.trim();
+                        }
+                    }
+                    return null;
+                }""",
+                field,
+            )
+            if val:
+                result[field] = str(val).split("\n")[0].strip()
+                continue
+        except Exception:
+            pass
+
+        # 策略 2：XPath
+        for xpath in [
+            f"xpath://td[normalize-space(.)='{field}']/following-sibling::td[1]",
+            f"xpath://span[normalize-space(.)='{field}']/following-sibling::span[1]",
+            f"xpath://div[normalize-space(.)='{field}']/following-sibling::div[1]",
+            f"xpath://*[normalize-space(.)='{field}']/../following-sibling::*[1]",
+        ]:
+            try:
+                el = page.ele(xpath, timeout=1)
+                if el:
+                    txt = el.text.strip().split("\n")[0].strip()
+                    if txt:
+                        result[field] = txt
+                        break
+            except Exception:
+                continue
+
     return result
 
 
-def _extract_from_dom(page: ChromiumPage, field: str) -> str | None:
-    # TreeWalker
-    try:
-        val = page.run_js(
-            """(field) => {
-                const walker = document.createTreeWalker(
-                    document.body, NodeFilter.SHOW_TEXT);
-                let node;
-                while ((node = walker.nextNode())) {
-                    if (node.textContent.trim() === field) {
-                        const sib = node.parentElement.nextElementSibling;
-                        if (sib) return sib.innerText.trim();
-                        const par = node.parentElement.parentElement;
-                        if (par?.nextElementSibling)
-                            return par.nextElementSibling.innerText.trim();
-                    }
-                }
-                return null;
-            }""",
-            field,
-        )
-        if val:
-            return str(val).split("\n")[0].strip()
-    except Exception:
-        pass
-
-    for xpath in [
-        f"xpath://td[normalize-space()='{field}']/following-sibling::td[1]",
-        f"xpath://span[normalize-space()='{field}']/following-sibling::span[1]",
-        f"xpath://*[normalize-space()='{field}']/../following-sibling::*[1]",
-    ]:
-        try:
-            el = page.ele(xpath, timeout=2)
-            if el:
-                txt = el.text.strip().split("\n")[0].strip()
-                if txt:
-                    return txt
-        except Exception:
-            continue
-    return None
-
-
 # ---------------------------------------------------------------------------
-# 登录检测
-# ---------------------------------------------------------------------------
-
-def _is_logged_in(page: ChromiumPage) -> bool:
-    """检测当前页面是否已登录（找登出/用户名元素）."""
-    login_indicators = [
-        "tag:a@text():退出", "tag:a@text():登出", "tag:a@text():注销",
-        ".user-info", ".user-avatar", ".logout", ".sign-out",
-        "tag:span@text():退出登录",
-    ]
-    for sel in login_indicators:
-        try:
-            el = page.ele(sel, timeout=2)
-            if el:
-                return True
-        except Exception:
-            continue
-
-    # 反向判断：如果找到登录按钮，说明未登录
-    not_logged_in = [
-        "tag:a@text():登录", "tag:a@text():注册", "tag:button@text():登录",
-        ".login-btn", "#loginBtn",
-    ]
-    for sel in not_logged_in:
-        try:
-            el = page.ele(sel, timeout=2)
-            if el:
-                return False
-        except Exception:
-            continue
-
-    # 无法判断，乐观认为已登录
-    return True
-
-
-def _ensure_logged_in(page: ChromiumPage):
-    """如未登录则暂停，等待用户手动在浏览器里完成登录."""
-    page.get(SITE, timeout=30)
-    _jitter(1.5, 2.5)
-
-    if not _is_logged_in(page):
-        log.warning("=" * 60)
-        log.warning("检测到未登录！请在已打开的浏览器窗口中手动登录维运网。")
-        log.warning("登录完成后，回到此终端按 Enter 键继续...")
-        log.warning("=" * 60)
-        input()
-        # 登录后刷新一次确认
-        page.refresh()
-        _jitter(1.0, 2.0)
-        if not _is_logged_in(page):
-            log.warning("仍未检测到登录状态，将继续尝试（如已登录可忽略此警告）。")
-    else:
-        log.info("已检测到登录状态，继续执行。")
-
-
-# ---------------------------------------------------------------------------
-# 单条船舶抓取
+# 单条抓取（核心流程）
 # ---------------------------------------------------------------------------
 
 def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
@@ -201,23 +135,19 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
     }
 
     try:
-        page.listen.start(LISTEN_KEYWORD, method="GET")
-
-        # 回到首页搜索（不重新登录）
+        # ── 1. 回到首页 ──────────────────────────────────────────────
         page.get(SITE, timeout=30)
-        _jitter(1.0, 2.0)
+        _jitter(1.2, 2.2)
 
-        # 找搜索框
-        input_candidates = [
+        # ── 2. 找搜索框 ───────────────────────────────────────────────
+        for sel in [
             "tag:input@placeholder:船",
             "tag:input@placeholder:ship",
             "tag:input@placeholder:vessel",
             "tag:input@placeholder:IMO",
             ".search-input",
             "tag:input@type=text",
-        ]
-        search_box = None
-        for sel in input_candidates:
+        ]:
             try:
                 el = page.ele(sel, timeout=3)
                 if el:
@@ -225,92 +155,122 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
                     break
             except Exception:
                 continue
-
-        if not search_box:
-            log.warning(f"[{ship_name}] 未找到搜索框，保存截图 debug_{ship_name}.png")
+        else:
+            log.warning(f"[{ship_name}] 未找到搜索框 → 截图 debug_{ship_name}.png")
             page.get_screenshot(path=f"debug_{ship_name}.png", full_page=True)
             record["status"] = "no_search_box"
-            page.listen.stop()
             return record
 
-        # 人工输入
+        # ── 3. 输入船名 ───────────────────────────────────────────────
         _human_type(search_box, ship_name.upper())
-        _jitter(0.5, 1.2)
+        _jitter(1.0, 2.0)   # 等待自动补全出现
 
-        # 搜索
-        btn_candidates = [
-            "tag:button@type=submit",
-            ".search-btn", ".icon-search", ".search-icon",
-            "tag:button@text():搜索", "tag:button@text():查询",
-        ]
+        # ── 4. 点击自动补全第一条 ─────────────────────────────────────
+        # 点击后网站会跳转到 /shipLocate?vn=...&imo=...&t=...
         clicked = False
-        for sel in btn_candidates:
-            try:
-                btn = page.ele(sel, timeout=2)
-                if btn:
-                    btn.click()
-                    clicked = True
-                    break
-            except Exception:
-                continue
-        if not clicked:
-            search_box.input("\n")
-
-        _jitter(2.0, 3.5)
-
-        # 下拉建议，点第一条
-        dropdown_candidates = [
-            ".autocomplete-item", ".suggestion-item",
-            ".search-dropdown li", ".dropdown-menu li",
+        for sel in [
+            ".autocomplete-item",
+            ".suggestion-item",
+            ".search-result-item",
+            ".search-dropdown li",
+            ".dropdown-menu li",
             f"tag:li@@text():{ship_name.upper()}",
-        ]
-        for sel in dropdown_candidates:
+            "tag:li",           # 兜底：下拉里第一个 li
+        ]:
             try:
-                el = page.ele(sel, timeout=2)
+                el = page.ele(sel, timeout=3)
                 if el:
                     el.click()
-                    _jitter(1.5, 2.5)
+                    clicked = True
+                    log.info(f"  点击补全项: {el.text[:40]!r}")
                     break
             except Exception:
                 continue
 
-        # 等待 shipLocate API（加密参数由浏览器自己处理）
-        log.info(f"  等待 shipLocate API 响应（最多 15s）...")
-        packet = page.listen.wait(timeout=15)
-        page.listen.stop()
+        if not clicked:
+            # 没有补全就直接回车，走搜索结果页再点第一条
+            search_box.input("\n")
+            _jitter(2.0, 3.0)
 
-        if packet and packet.response:
-            try:
-                api_result = _parse_api_body(packet.response.body)
-                if api_result:
-                    record.update(api_result)
-                    log.debug(f"  API 命中: {api_result}")
-            except Exception as e:
-                log.debug(f"  解析 API 响应失败: {e}")
-        else:
-            log.warning(f"  未捕获到 API 响应，尝试 DOM 提取...")
-            # 超时时截图，便于排查
+            for sel in [
+                ".search-result-item", ".result-item",
+                ".ship-item", ".vessel-item",
+                "tag:li@@text():ship",
+                ".list-item",
+            ]:
+                try:
+                    el = page.ele(sel, timeout=4)
+                    if el:
+                        el.click()
+                        log.info(f"  点击搜索结果: {el.text[:40]!r}")
+                        break
+                except Exception:
+                    continue
+
+        # ── 5. 等待跳转到 shipLocate 页面 ────────────────────────────
+        log.info(f"  等待跳转 shipLocate 页面（最多 20s）...")
+        arrived = _wait_for_url(page, "shipLocate", timeout=20)
+
+        if not arrived:
+            log.warning(f"  未到达 shipLocate，当前 URL: {page.url}")
             page.get_screenshot(path=f"debug_{ship_name}.png", full_page=True)
+            record["status"] = "no_navigate"
+            return record
 
-        # DOM 兜底
-        for field in TARGET_FIELDS + ["IMO"]:
-            if not record.get(field):
-                val = _extract_from_dom(page, field)
-                if val:
-                    record[field] = val
+        log.info(f"  已到达: {page.url}")
+        page.wait.load()        # 等待页面完全渲染
+        _jitter(1.0, 2.0)
+
+        # ── 6. 提取字段 ───────────────────────────────────────────────
+        extracted = _extract_fields(page)
+        record.update(extracted)
 
         filled = sum(1 for f in TARGET_FIELDS if record.get(f))
-        record["status"] = "ok" if filled > 0 else "no_data"
+        if filled == 0:
+            log.warning(f"  字段均为空 → 截图 debug_{ship_name}.png")
+            page.get_screenshot(path=f"debug_{ship_name}.png", full_page=True)
+            record["status"] = "no_data"
+        else:
+            record["status"] = "ok"
 
     except Exception as exc:
         record["status"] = f"error:{str(exc)[:80]}"
         log.error(f"[{ship_name}] 异常: {exc}")
-        try:
-            page.listen.stop()
-        except Exception:
-            pass
 
     return record
+
+
+# ---------------------------------------------------------------------------
+# 登录检测
+# ---------------------------------------------------------------------------
+
+def _ensure_logged_in(page: ChromiumPage):
+    page.get(SITE, timeout=30)
+    _jitter(1.5, 2.5)
+
+    not_logged_in_signs = [
+        "tag:a@text():登录", "tag:a@text():注册",
+        "tag:button@text():登录", ".login-btn", "#loginBtn",
+    ]
+    needs_login = False
+    for sel in not_logged_in_signs:
+        try:
+            if page.ele(sel, timeout=2):
+                needs_login = True
+                break
+        except Exception:
+            continue
+
+    if needs_login:
+        log.warning("=" * 60)
+        log.warning("检测到未登录！请在已打开的浏览器窗口中手动登录维运网。")
+        log.warning("登录完成后，回到此终端按 Enter 键继续...")
+        log.warning("=" * 60)
+        input()
+        page.refresh()
+        _jitter(1.0, 2.0)
+    else:
+        log.info("已登录，开始抓取。")
 
 
 # ---------------------------------------------------------------------------
@@ -325,18 +285,15 @@ def _build_page(port: int | None = None) -> ChromiumPage:
     opt.set_argument("--disable-dev-shm-usage")
 
     if port:
-        # 接管已开启调试端口的 Chrome（最稳定，直接用已登录 session）
-        log.info(f"连接到已有 Chrome（端口 {port}）...")
+        log.info(f"接管已有 Chrome（端口 {port}）...")
         opt.set_address(f"127.0.0.1:{port}")
     else:
-        # 自己开 Chrome，持久化 profile
         profile_dir = Path("./chrome_profile").resolve()
         profile_dir.mkdir(exist_ok=True)
         opt.set_user_data_path(str(profile_dir))
         opt.headless(False)
 
     page = ChromiumPage(addr_or_opts=opt)
-    # 隐藏 webdriver 标记
     page.run_js(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
@@ -353,7 +310,6 @@ def run(ship_names: list[str], output: str, port: int | None = None) -> pd.DataF
     results: list[dict] = []
 
     try:
-        # 登录检测（仅在自己开 Chrome 时检测，接管模式假定已登录）
         if not port:
             _ensure_logged_in(page)
 
@@ -368,16 +324,14 @@ def run(ship_names: list[str], output: str, port: int | None = None) -> pd.DataF
                 f"  船长={rec['船长']}  船宽={rec['船宽']}  "
                 f"船型={rec['船型']}  吃水={rec['吃水']}  [{rec['status']}]"
             )
-
-            # 增量保存，防止中途崩溃丢数据
+            # 每条都增量保存
             pd.DataFrame(results).to_excel(output, index=False)
 
             if idx < len(ship_names):
-                _jitter(2.5, 5.0)
+                _jitter(3.0, 5.0)
     finally:
         if not port:
             page.quit()
-        # 有 port 时不关闭，用户的 Chrome 继续开着
 
     df = pd.DataFrame(results)
     ok = (df["status"] == "ok").sum()
@@ -404,17 +358,14 @@ def main():
     parser.add_argument("-c", "--column", default=None, help="船名列名")
     parser.add_argument("-o", "--output", default="ship_data_output.xlsx")
     parser.add_argument("-s", "--ships", nargs="+", help="直接指定船名")
-    parser.add_argument(
-        "--port", type=int, default=None,
-        help="接管已开启 --remote-debugging-port 的 Chrome，例如 --port 9222"
-    )
+    parser.add_argument("--port", type=int, default=None,
+                        help="接管已登录 Chrome 的调试端口，例如 --port 9222")
     parser.add_argument("--gen-sample", action="store_true")
     args = parser.parse_args()
 
     if args.gen_sample:
         pd.DataFrame({"船名(英文)": ["KOWLOON", "EVER GIVEN", "MSC OSCAR"]}).to_excel(
-            "input.xlsx", index=False
-        )
+            "input.xlsx", index=False)
         print("已生成 input.xlsx")
         return
 
