@@ -273,37 +273,62 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
 
 def _ensure_logged_in(page: ChromiumPage):
     page.get(SITE, timeout=30)
-    _jitter(1.5, 2.5)
+    _jitter(2.0, 3.0)
 
-    # @@text() = 包含匹配；页面上显示的是「登录/注册」「登录查看」等
-    not_logged_in_signs = [
-        "tag:a@@text():登录",
-        "tag:span@@text():登录",
-        "tag:button@@text():登录",
-        "tag:div@@text():登录查看",
-        ".login-btn", "#loginBtn",
-    ]
-    needs_login = False
-    for sel in not_logged_in_signs:
+    def _needs_login() -> str | None:
+        """返回未登录原因字符串，None 表示已登录。"""
+        url = page.url.lower()
+        # 1. URL 被重定向（被踢到注册/登录/绑定页）
+        for kw in ["bind", "login", "register", "signin", "auth", "regist"]:
+            if kw in url:
+                return f"URL 重定向: {page.url}"
+        # 2. 页面标题含注册/登录字样
         try:
-            el = page.ele(sel, timeout=2)
-            if el:
-                log.info(f"  检测到未登录元素: {el.text[:30]!r}")
-                needs_login = True
-                break
+            title = page.title
+            for kw in ["绑定", "注册", "登录", "Login", "Register"]:
+                if kw in title:
+                    return f"页面标题: {title}"
         except Exception:
-            continue
+            pass
+        # 3. 页面正文出现「登录/注册」或「存续/注册」按钮
+        for sel in [
+            "xpath://*[contains(@class,'login') or contains(@class,'register') or contains(@class,'signin')]",
+            "tag:a@@text():登录",
+            "tag:a@@text():注册",
+            "tag:span@@text():登录",
+            "tag:button@@text():登录",
+        ]:
+            try:
+                el = page.ele(sel, timeout=1)
+                if el and el.text.strip():
+                    return f"页面元素: {el.text.strip()[:30]!r}"
+            except Exception:
+                continue
+        return None
 
-    if needs_login:
+    reason = _needs_login()
+    if reason:
+        # 若被重定向，先导回首页
+        if "URL" in reason:
+            page.get(SITE, timeout=30)
+            _jitter(1.0, 1.5)
+
         log.warning("=" * 60)
-        log.warning("检测到未登录！请在已打开的浏览器窗口中手动登录维运网。")
-        log.warning("登录完成后，回到此终端按 Enter 键继续...")
+        log.warning(f"检测到未登录（{reason}）")
+        log.warning("请在浏览器窗口中完成登录，登录后回到终端按 Enter 继续...")
         log.warning("=" * 60)
         input()
-        page.refresh()
-        _jitter(1.0, 2.0)
+        page.get(SITE, timeout=30)   # 登录后刷新回首页
+        _jitter(1.5, 2.5)
+
+        # 二次确认
+        reason2 = _needs_login()
+        if reason2:
+            log.warning(f"仍未确认登录（{reason2}），继续尝试...")
+        else:
+            log.info("登录确认，开始抓取。")
     else:
-        log.info("登录状态确认，开始抓取。")
+        log.info("登录确认，开始抓取。")
 
 
 # ---------------------------------------------------------------------------
