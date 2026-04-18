@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 import pandas as pd
+import urllib.request
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 log = logging.getLogger(__name__)
@@ -277,6 +278,21 @@ def _ensure_logged_in(page: ChromiumPage):
 # 浏览器初始化
 # ---------------------------------------------------------------------------
 
+def _find_chrome_port() -> int | None:
+    """自动扫描 9222-9230，找到正在运行的 Chrome 调试端口。"""
+    for p in range(9222, 9231):
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{p}/json/version", timeout=1
+            ) as r:
+                if r.status == 200:
+                    log.info(f"自动检测到 Chrome 调试端口: {p}")
+                    return p
+        except Exception:
+            continue
+    return None
+
+
 def _build_page(port: int | None = None) -> ChromiumPage:
     opt = ChromiumOptions()
     opt.set_argument("--disable-blink-features=AutomationControlled")
@@ -358,8 +374,9 @@ def main():
     parser.add_argument("-c", "--column", default=None, help="船名列名")
     parser.add_argument("-o", "--output", default="ship_data_output.xlsx")
     parser.add_argument("-s", "--ships", nargs="+", help="直接指定船名")
-    parser.add_argument("--port", type=int, default=None,
-                        help="接管已登录 Chrome 的调试端口，例如 --port 9222")
+    parser.add_argument("--port", default=None,
+                        help="接管已登录 Chrome 的调试端口，例如 --port 9222；"
+                             "填 auto 则自动扫描")
     parser.add_argument("--gen-sample", action="store_true")
     args = parser.parse_args()
 
@@ -381,7 +398,22 @@ def main():
         log.info(f"使用列 '{col}' 作为船名")
         ship_names = df_in[col].dropna().astype(str).unique().tolist()
 
-    run(ship_names, args.output, port=args.port)
+    port = None
+    if args.port:
+        if str(args.port).lower() == "auto":
+            port = _find_chrome_port()
+            if port is None:
+                log.error(
+                    "未找到 Chrome 调试端口（9222-9230）。\n"
+                    "请用以下命令重新打开 Chrome：\n"
+                    "  chrome.exe --remote-debugging-port=9222 --user-data-dir=C:\\chrome_debug\n"
+                    "然后在 Chrome 里登录网站，再运行脚本。"
+                )
+                return
+        else:
+            port = int(args.port)
+
+    run(ship_names, args.output, port=port)
 
 
 if __name__ == "__main__":
