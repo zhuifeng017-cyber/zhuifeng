@@ -50,22 +50,20 @@ def _jitter(lo: float = 1.0, hi: float = 2.5):
 
 def _set_input(page: ChromiumPage, ele, text: str):
     """
-    向 Vue/React 受控 input 写入值。
-    直接用 HTMLInputElement.prototype 的 native setter 写值，
-    再 dispatch input/change 事件，触发框架的响应式更新。
-    普通 ele.input() 或 ele.clear() 会被框架拦截，导致值为空。
+    向 Ant Design / Vue / React 受控 input 写入值。
+    用 ele.run_js()（this = 元素本身）调用 native setter，
+    再 dispatch input/change 事件触发框架响应式更新。
     """
     ele.click()
     time.sleep(0.3)
-    page.run_js("""
-        const el   = arguments[0];
-        const text = arguments[1];
+    # ele.run_js 里 this 就是该元素，比 page.run_js(script, ele) 更稳定
+    ele.run_js(f"""
         const setter = Object.getOwnPropertyDescriptor(
             window.HTMLInputElement.prototype, 'value').set;
-        setter.call(el, text);
-        el.dispatchEvent(new Event('input',  {bubbles: true}));
-        el.dispatchEvent(new Event('change', {bubbles: true}));
-    """, ele, text)
+        setter.call(this, {repr(text)});
+        this.dispatchEvent(new Event('input',  {{bubbles: true}}));
+        this.dispatchEvent(new Event('change', {{bubbles: true}}));
+    """)
     time.sleep(0.4)
 
 
@@ -196,39 +194,24 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
         """)
         log.info(f"  页面输入框列表: {all_inputs}")
 
-        # 优先找 placeholder 含船舶相关关键词的输入框（排除全局搜索栏）
+        # 船舶定位页的搜索框是 Ant Design Input，class = ant-input
+        # （通过日志确认 placeholder = '请输入搜索内容'，type=text，cls=ant-input）
         search_box = None
-        kw_list = ["英文船名", "MMSI", "船名", "IMO/MMSI", "船舶"]
-        for kw in kw_list:
+        for sel in [
+            ".ant-input",                                          # Ant Design Input 组件
+            "xpath://input[contains(@placeholder,'英文船名')]",
+            "xpath://input[contains(@placeholder,'MMSI')]",
+            "xpath://input[contains(@placeholder,'船名')]",
+            "xpath://input[@type='text' and not(@id)]",           # 无 id 的文本框
+        ]:
             try:
-                el = page.ele(f"xpath://input[contains(@placeholder,'{kw}')]", timeout=3)
+                el = page.ele(sel, timeout=3)
                 if el:
                     search_box = el
-                    log.info(f"  找到船舶定位输入框: {el.attr('placeholder')!r}")
+                    log.info(f"  找到输入框: placeholder={el.attr('placeholder')!r} cls={el.attr('class')!r}")
                     break
             except Exception:
                 continue
-
-        # 兜底：找所有可见输入框，跳过 placeholder 含「搜索内容/搜索网站」的全局搜索栏
-        if not search_box:
-            for inp in page.eles("tag:input"):
-                try:
-                    ph = inp.attr("placeholder") or ""
-                    t  = (inp.attr("type") or "text").lower()
-                    if t in ("hidden", "password", "submit", "button", "file"):
-                        continue
-                    if any(x in ph for x in ["搜索内容", "搜索网站", "搜索关键"]):
-                        continue          # 跳过顶部全局搜索栏
-                    visible = page.run_js("""
-                        const r = arguments[0].getBoundingClientRect();
-                        return r.width > 100 && r.height > 0;
-                    """, inp)
-                    if visible:
-                        search_box = inp
-                        log.info(f"  兜底找到输入框: {ph!r}")
-                        break
-                except Exception:
-                    continue
 
         if not search_box:
             log.warning(f"[{ship_name}] 未找到搜索输入框 → 截图")
