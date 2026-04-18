@@ -166,63 +166,63 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
             return record
 
         # ── 3. 输入船名 ───────────────────────────────────────────────
+        search_box.click()
         _human_type(search_box, ship_name.upper())
-        _jitter(1.0, 2.0)   # 等待自动补全出现
+        _jitter(1.5, 2.5)   # 等待自动补全出现
 
-        # ── 4. 触发自动补全并选择第一条 ──────────────────────────────
-        # 截图：看输入后页面上出现了什么
+        # 截图：记录输入后页面状态
         page.get_screenshot(path=f"debug_{ship_name}_after_type.png")
+        log.info(f"  已输入船名，截图已保存 debug_{ship_name}_after_type.png")
 
-        # 策略A：用键盘 ↓ 键选中补全第一项，再回车确认
-        # 适用于大多数基于 input 的自动补全组件
-        try:
-            page.actions.key_down("ArrowDown").key_up("ArrowDown")
-            time.sleep(0.4)
-            page.actions.key_down("Return").key_up("Return")
-            log.info("  已用键盘 ↓+Enter 选中补全项")
-        except Exception as e:
-            log.debug(f"  键盘导航失败: {e}")
+        # ── 4. 提交搜索（多策略，依次尝试）────────────────────────────
 
-        _jitter(1.5, 2.5)
+        # 策略A：JS 找搜索框旁边的按钮并点击（最可靠）
+        clicked_btn = page.run_js("""
+            const inp = arguments[0];
+            let node = inp.parentElement;
+            for (let i = 0; i < 6; i++) {
+                if (!node) break;
+                const btn = node.querySelector(
+                    'button, [class*="search"], [class*="btn"], [class*="icon"]'
+                );
+                if (btn && btn !== inp) { btn.click(); return btn.className || btn.tagName; }
+                node = node.parentElement;
+            }
+            return null;
+        """, search_box)
 
-        # 如果键盘没触发跳转，再尝试点击具体的补全条目
+        if clicked_btn:
+            log.info(f"  JS 点击搜索按钮: {clicked_btn!r}")
+        else:
+            # 策略B：在 input 上直接 dispatch Enter keydown 事件
+            search_box.run_js("""
+                ['keydown','keypress','keyup'].forEach(type => {
+                    this.dispatchEvent(new KeyboardEvent(type, {
+                        key:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true
+                    }));
+                });
+            """)
+            log.info("  JS dispatch Enter 事件")
+
+        _jitter(2.0, 3.0)
+        page.get_screenshot(path=f"debug_{ship_name}_after_search.png")
+
+        # 策略C：如还未跳转，尝试点击页面上出现的第一个含船名文字的可点击元素
         if "shipLocate" not in page.url:
-            clicked = False
-            for sel in [
-                ".autocomplete-item",
-                ".suggestion-item",
-                ".search-result-item",
-                ".search-dropdown li",
-                ".dropdown-menu li",
-                f"tag:li@@text():{ship_name.upper()}",
-            ]:
-                try:
-                    el = page.ele(sel, timeout=2)
-                    if el and el.text.strip():
-                        el.click()
-                        clicked = True
-                        log.info(f"  点击补全项: {el.text[:40]!r}")
-                        break
-                except Exception:
-                    continue
-
-            if not clicked:
-                log.info("  未找到补全项，回车提交搜索...")
-                search_box.input("\n")
+            found = page.run_js(f"""
+                const name = '{ship_name.upper()}';
+                const all = document.querySelectorAll('a, li, div, span');
+                for (const el of all) {{
+                    if (el.innerText && el.innerText.trim().toUpperCase().includes(name)) {{
+                        el.click();
+                        return el.innerText.trim().slice(0, 60);
+                    }}
+                }}
+                return null;
+            """)
+            if found:
+                log.info(f"  JS 点击含船名元素: {found!r}")
                 _jitter(2.0, 3.0)
-                # 搜索结果页点第一条
-                for sel in [
-                    ".search-result-item", ".result-item",
-                    ".ship-item", ".vessel-item", ".list-item",
-                ]:
-                    try:
-                        el = page.ele(sel, timeout=4)
-                        if el and el.text.strip():
-                            el.click()
-                            log.info(f"  点击搜索结果: {el.text[:40]!r}")
-                            break
-                    except Exception:
-                        continue
 
         # ── 5. 等待跳转到 shipLocate 页面 ────────────────────────────
         log.info(f"  等待跳转 shipLocate 页面（最多 20s）...")
@@ -406,8 +406,8 @@ def run(ship_names: list[str], output: str, port: int) -> pd.DataFrame:
                 f"  船长={rec['船长']}  船宽={rec['船宽']}  "
                 f"船型={rec['船型']}  吃水={rec['吃水']}  [{rec['status']}]"
             )
-            # 每条都增量保存
-            pd.DataFrame(results).to_excel(output, index=False)
+            # 每条都增量保存（文件被占用时自动换名）
+            _safe_save(pd.DataFrame(results), output)
 
             if idx < len(ship_names):
                 _jitter(3.0, 5.0)
@@ -415,9 +415,23 @@ def run(ship_names: list[str], output: str, port: int) -> pd.DataFrame:
         pass  # 保持 Chrome 开着，方便用户检查
 
     df = pd.DataFrame(results)
+    saved = _safe_save(df, output)
     ok = (df["status"] == "ok").sum()
-    log.info(f"完成。成功率 {ok}/{len(df)} ({ok/max(len(df),1)*100:.1f}%) → {output}")
+    log.info(f"完成。成功率 {ok}/{len(df)} ({ok/max(len(df),1)*100:.1f}%) → {saved}")
     return df
+
+
+def _safe_save(df: pd.DataFrame, path: str) -> str:
+    """保存 Excel，文件被占用时自动加时间戳换名。"""
+    try:
+        df.to_excel(path, index=False)
+        return path
+    except PermissionError:
+        ts = time.strftime("%H%M%S")
+        alt = path.replace(".xlsx", f"_{ts}.xlsx")
+        df.to_excel(alt, index=False)
+        log.warning(f"文件被占用，已另存为 {alt}（请关闭 Excel 后重试）")
+        return alt
 
 
 # ---------------------------------------------------------------------------
