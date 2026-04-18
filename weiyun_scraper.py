@@ -139,70 +139,56 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
     }
 
     try:
-        # ── 1. 打开首页 ───────────────────────────────────────────────
-        page.get(SITE, timeout=30)
+        # ── 1. 直接打开船舶定位搜索页 ────────────────────────────────
+        # 点击首页「船舶定位」标签会跳转到此页面，直接导航更可靠
+        page.get(f"{SITE}/shipLocate", timeout=30)
         _jitter(1.5, 2.5)
+
+        # 若被重定向回首页（未登录），截图并退出
+        if "shipLocate" not in page.url:
+            log.warning(f"[{ship_name}] 跳转船舶定位页失败，当前 URL: {page.url} → 截图")
+            page.get_screenshot(path=f"debug_{ship_name}.png", full_page=True)
+            record["status"] = "no_navigate"
+            return record
+
+        log.info(f"  已到达船舶定位页: {page.url}")
 
         # ── 2. 关闭可能存在的弹窗 ────────────────────────────────────
         for btn_sel in [
             "tag:button@@text():确认",
             "tag:button@@text():确定",
             "tag:button@@text():关闭",
-            ".el-button--primary",
         ]:
             try:
                 btn = page.ele(btn_sel, timeout=1)
                 if btn:
                     btn.click()
-                    _jitter(0.5, 1.0)
+                    _jitter(0.3, 0.8)
                     break
             except Exception:
                 pass
 
-        # ── 3. 点击「船舶定位」标签 ───────────────────────────────────
-        for sel in [
-            "tag:span@@text():船舶定位",
-            "tag:a@@text():船舶定位",
-            "tag:div@@text():船舶定位",
-            "xpath://*[contains(text(),'船舶定位')]",
-        ]:
-            try:
-                tab = page.ele(sel, timeout=5)
-                if tab:
-                    tab.click()
-                    log.info("  已点击「船舶定位」标签")
-                    _jitter(1.0, 1.5)
-                    break
-            except Exception:
-                continue
-        else:
-            log.warning(f"[{ship_name}] 未找到「船舶定位」标签 → 截图")
-            page.get_screenshot(path=f"debug_{ship_name}.png", full_page=True)
-            record["status"] = "no_tab"
-            return record
-
-        # ── 4. 在船舶定位面板里找输入框并输入船名 ────────────────────
-        # 船舶定位面板的输入框 placeholder 通常含"船名/IMO/呼号"等
-        # ── 4. 在船舶定位面板里找输入框并填入船名 ──────────────────────
-        # 船舶定位的输入框 placeholder = "请输入英文船名/IMO/MMSI，无需输入符号及航次"
-        _jitter(1.0, 1.5)
+        # ── 3. 找输入框并填入船名 ─────────────────────────────────────
+        # placeholder = "请输入英文船名/IMO/MMSI，无需输入符号及航次"
+        _jitter(0.8, 1.2)
         search_box = None
         for sel in [
-            "tag:input@placeholder:英文船名",   # 精确匹配 placeholder 关键字
-            "tag:input@placeholder:MMSI",
-            "tag:input@placeholder:IMO",
+            "xpath://input[contains(@placeholder,'英文船名')]",
+            "xpath://input[contains(@placeholder,'MMSI')]",
+            "xpath://input[contains(@placeholder,'IMO')]",
+            "tag:input@type=text",
         ]:
             try:
                 el = page.ele(sel, timeout=5)
                 if el:
                     search_box = el
-                    log.info(f"  找到船舶定位输入框: {el.attr('placeholder')!r}")
+                    log.info(f"  找到输入框: {el.attr('placeholder')!r}")
                     break
             except Exception:
                 continue
 
         if not search_box:
-            log.warning(f"[{ship_name}] 未找到船舶定位输入框 → 截图")
+            log.warning(f"[{ship_name}] 未找到搜索输入框 → 截图")
             page.get_screenshot(path=f"debug_{ship_name}.png", full_page=True)
             record["status"] = "no_search_box"
             return record
@@ -211,10 +197,9 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
         _human_type(search_box, ship_name.upper())
         _jitter(0.8, 1.2)
 
-        # ── 5. 点击「搜索」按钮 ───────────────────────────────────────
-        # 船舶定位面板的搜索按钮文字就是「搜索」
+        # ── 4. 点击「搜索」按钮 ───────────────────────────────────────
         clicked_btn = False
-        for sel in ["tag:button@@text():搜索", "xpath://button[contains(.,'搜索')]"]:
+        for sel in ["xpath://button[contains(.,'搜索')]", "tag:button@@text():搜索"]:
             try:
                 btn = page.ele(sel, timeout=3)
                 if btn:
@@ -231,8 +216,8 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
             """)
             log.info("  JS Enter 兜底")
 
-        # ── 6. 等待跳转到 shipLocate 页面 ────────────────────────────
-        log.info(f"  等待跳转 shipLocate 页面（最多 20s）...")
+        # ── 5. 等待跳转到带参数的 shipLocate 详情页 ──────────────────
+        log.info(f"  等待 shipLocate 详情页加载（最多 20s）...")
         arrived = _wait_for_url(page, "shipLocate", timeout=20)
 
         if not arrived:
