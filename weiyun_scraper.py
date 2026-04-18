@@ -18,12 +18,15 @@
 
 import argparse
 import logging
+import os
 import random
+import subprocess
+import sys
 import time
+import urllib.request
 from pathlib import Path
 
 import pandas as pd
-import urllib.request
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 log = logging.getLogger(__name__)
@@ -291,37 +294,88 @@ def _ensure_logged_in(page: ChromiumPage):
 # 浏览器初始化
 # ---------------------------------------------------------------------------
 
+# Windows 常见 Chrome 安装路径
+_CHROME_PATHS = [
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+    r"C:\Program Files\Google\Chrome Beta\Application\chrome.exe",
+    # macOS
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    # Linux
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
+]
+
+DEBUG_PORT = 9222
+DEBUG_DIR  = str(Path("./chrome_debug").resolve())
+
+
+def _probe_port(port: int) -> bool:
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/version", timeout=1
+        ) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
 def _find_chrome_port() -> int | None:
-    """自动扫描 9222-9230，找到正在运行的 Chrome 调试端口。"""
+    """扫描 9222-9230，找到已开启调试端口的 Chrome。"""
     for p in range(9222, 9231):
-        try:
-            with urllib.request.urlopen(
-                f"http://127.0.0.1:{p}/json/version", timeout=1
-            ) as r:
-                if r.status == 200:
-                    log.info(f"自动检测到 Chrome 调试端口: {p}")
-                    return p
-        except Exception:
-            continue
+        if _probe_port(p):
+            log.info(f"检测到 Chrome 调试端口: {p}")
+            return p
     return None
 
 
-def _build_page(port: int | None = None) -> ChromiumPage:
+def _find_chrome_exe() -> str | None:
+    """在常见路径中寻找 Chrome 可执行文件。"""
+    for path in _CHROME_PATHS:
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
+def _launch_chrome(port: int = DEBUG_PORT) -> bool:
+    """
+    自动找到 Chrome 并以调试端口启动，打开维运网。
+    返回是否成功启动并监听。
+    """
+    exe = _find_chrome_exe()
+    if not exe:
+        log.error(
+            "未找到 Chrome。请手动打开 Chrome 并访问 weiyun001.com 登录，"
+            "同时在 Chrome 快捷方式中加入参数：\n"
+            f"  --remote-debugging-port={port} --user-data-dir={DEBUG_DIR}"
+        )
+        return False
+
+    log.info(f"启动 Chrome: {exe}")
+    Path(DEBUG_DIR).mkdir(exist_ok=True)
+    subprocess.Popen([
+        exe,
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={DEBUG_DIR}",
+        "--disable-blink-features=AutomationControlled",
+        SITE,   # 直接打开维运网
+    ])
+
+    # 等待 Chrome 就绪（最多 15 秒）
+    for i in range(15):
+        time.sleep(1)
+        if _probe_port(port):
+            log.info("Chrome 已就绪。")
+            return True
+    log.error("Chrome 启动超时。")
+    return False
+
+
+def _build_page(port: int) -> ChromiumPage:
     opt = ChromiumOptions()
-    opt.set_argument("--disable-blink-features=AutomationControlled")
-    opt.set_argument("--no-sandbox")
-    opt.set_argument("--disable-gpu")
-    opt.set_argument("--disable-dev-shm-usage")
-
-    if port:
-        log.info(f"接管已有 Chrome（端口 {port}）...")
-        opt.set_address(f"127.0.0.1:{port}")
-    else:
-        profile_dir = Path("./chrome_profile").resolve()
-        profile_dir.mkdir(exist_ok=True)
-        opt.set_user_data_path(str(profile_dir))
-        opt.headless(False)
-
+    opt.set_address(f"127.0.0.1:{port}")
     page = ChromiumPage(addr_or_opts=opt)
     page.run_js(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
@@ -333,14 +387,13 @@ def _build_page(port: int | None = None) -> ChromiumPage:
 # 批量执行
 # ---------------------------------------------------------------------------
 
-def run(ship_names: list[str], output: str, port: int | None = None) -> pd.DataFrame:
+def run(ship_names: list[str], output: str, port: int) -> pd.DataFrame:
     log.info(f"共 {len(ship_names)} 艘船 → {output}")
     page = _build_page(port)
     results: list[dict] = []
 
     try:
-        if not port:
-            _ensure_logged_in(page)
+        _ensure_logged_in(page)
 
         for idx, name in enumerate(ship_names, 1):
             name = str(name).strip()
@@ -359,8 +412,7 @@ def run(ship_names: list[str], output: str, port: int | None = None) -> pd.DataF
             if idx < len(ship_names):
                 _jitter(3.0, 5.0)
     finally:
-        if not port:
-            page.quit()
+        pass  # 保持 Chrome 开着，方便用户检查
 
     df = pd.DataFrame(results)
     ok = (df["status"] == "ok").sum()
@@ -411,20 +463,25 @@ def main():
         log.info(f"使用列 '{col}' 作为船名")
         ship_names = df_in[col].dropna().astype(str).unique().tolist()
 
-    port = None
-    if args.port:
-        if str(args.port).lower() == "auto":
-            port = _find_chrome_port()
-            if port is None:
-                log.error(
-                    "未找到 Chrome 调试端口（9222-9230）。\n"
-                    "请用以下命令重新打开 Chrome：\n"
-                    "  chrome.exe --remote-debugging-port=9222 --user-data-dir=C:/chrome_debug\n"
-                    "然后在 Chrome 里登录网站，再运行脚本。"
-                )
-                return
-        else:
-            port = int(args.port)
+    # 确定调试端口
+    if args.port and str(args.port).lower() != "auto":
+        port = int(args.port)
+    else:
+        # 先扫描已有 Chrome 调试实例
+        port = _find_chrome_port()
+
+    if port is None:
+        # 没有找到，自动启动 Chrome
+        log.info("未检测到 Chrome 调试实例，尝试自动启动...")
+        if not _launch_chrome(DEBUG_PORT):
+            return
+        port = DEBUG_PORT
+        # 提示用户登录
+        log.warning("=" * 60)
+        log.warning("Chrome 已打开并访问维运网。")
+        log.warning("请在浏览器中完成登录，登录后回到此终端按 Enter 继续...")
+        log.warning("=" * 60)
+        input()
 
     run(ship_names, args.output, port=port)
 
