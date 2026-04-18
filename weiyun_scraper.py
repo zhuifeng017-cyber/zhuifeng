@@ -183,25 +183,32 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
 
         # ── 4. 在船舶定位面板里找输入框并输入船名 ────────────────────
         # 船舶定位面板的输入框 placeholder 通常含"船名/IMO/呼号"等
+        # ── 4. 在船舶定位面板里找输入框 ──────────────────────────────
+        # 不靠 placeholder 猜测，用 JS 扫所有可见文本输入框
+        _jitter(1.0, 1.5)
         search_box = None
-        for sel in [
-            "tag:input@placeholder:船名",
-            "tag:input@placeholder:IMO",
-            "tag:input@placeholder:呼号",
-            "tag:input@placeholder:vessel",
-            "tag:input@placeholder:ship",
-        ]:
+        skip_types = {"hidden", "password", "checkbox", "radio", "submit", "button", "file", "image"}
+
+        for inp in page.eles("tag:input"):
             try:
-                el = page.ele(sel, timeout=4)
-                if el:
-                    search_box = el
-                    log.info(f"  找到输入框: placeholder={el.attr('placeholder')!r}")
+                if (inp.attr("type") or "text").lower() in skip_types:
+                    continue
+                visible = page.run_js("""
+                    const r = arguments[0].getBoundingClientRect();
+                    const s = window.getComputedStyle(arguments[0]);
+                    return r.width > 30 && r.height > 0
+                        && s.display !== 'none' && s.visibility !== 'hidden';
+                """, inp)
+                if visible:
+                    ph = inp.attr("placeholder") or ""
+                    log.info(f"  找到可见输入框: placeholder={ph!r}  id={inp.attr('id')!r}")
+                    search_box = inp
                     break
             except Exception:
                 continue
 
         if not search_box:
-            log.warning(f"[{ship_name}] 未找到船舶定位输入框 → 截图")
+            log.warning(f"[{ship_name}] 未找到可见输入框 → 截图")
             page.get_screenshot(path=f"debug_{ship_name}.png", full_page=True)
             record["status"] = "no_search_box"
             return record
@@ -211,7 +218,6 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
         _jitter(1.0, 1.5)
 
         # ── 5. 点击搜索按钮 ───────────────────────────────────────────
-        # 找 input 同级或父级容器里的搜索按钮
         clicked_btn = page.run_js("""
             const inp = arguments[0];
             let node = inp.parentElement;
@@ -227,14 +233,13 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
         if clicked_btn:
             log.info(f"  点击搜索按钮: {clicked_btn!r}")
         else:
-            # 兜底：直接触发 Enter
             search_box.run_js("""
                 this.dispatchEvent(new KeyboardEvent('keydown',
                     {key:'Enter',keyCode:13,bubbles:true,cancelable:true}));
             """)
             log.info("  JS dispatch Enter 兜底")
 
-        # ── 5. 等待跳转到 shipLocate 页面 ────────────────────────────
+        # ── 6. 等待跳转到 shipLocate 页面 ────────────────────────────
         log.info(f"  等待跳转 shipLocate 页面（最多 20s）...")
         arrived = _wait_for_url(page, "shipLocate", timeout=20)
 
