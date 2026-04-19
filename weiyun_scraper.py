@@ -84,81 +84,73 @@ def _wait_for_url(page: ChromiumPage, keyword: str, timeout: float = 20.0) -> bo
 def _extract_fields(page: ChromiumPage) -> dict:
     """
     从船舶定位左侧面板提取目标字段。
-    页面布局：label（含冒号）+ 同级 value，例如「船长：」→ 「186m」
+    主策略：获取页面完整 innerText 后用正则提取，不依赖 DOM 结构。
     """
+    import re
     result: dict = {}
 
-    # 一次性用 JS 遍历所有 label:value，覆盖所有目标字段
+    # ── 主策略：innerText + 正则 ─────────────────────────────────
     try:
-        extracted = page.run_js("""
-            const targets = ['船长', '船宽', '船型', '吃水', 'IMO', 'MMSI', '呼号', '船籍'];
-            const result = {};
-            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-            let node;
-            while ((node = walker.nextNode())) {
-                const raw = node.textContent.trim();
-                for (const field of targets) {
-                    if (result[field]) continue;
-                    // 匹配 "船长" / "船长:" / "船长：" / "IMO:" / "IMO："
-                    const isMatch = raw === field ||
-                        raw === field + ':' || raw === field + '：' ||
-                        raw.startsWith(field + ':') || raw.startsWith(field + '：');
-                    if (!isMatch) continue;
+        page_text = page.run_js("return document.documentElement.innerText || ''")
+        log.info(f"  页面文本(前600字): {page_text[:600]!r}")
 
-                    const par = node.parentElement;
-                    if (!par) continue;
-
-                    // 同一文本节点内含冒号（如 "船长: 186m"）
-                    const colonIdx = Math.max(raw.indexOf(':'), raw.indexOf('：'));
-                    if (colonIdx >= 0 && colonIdx < raw.length - 1) {
-                        result[field] = raw.slice(colonIdx + 1).trim();
-                        break;
-                    }
-                    // 父元素的下一兄弟
-                    const sib = par.nextElementSibling;
-                    if (sib && sib.innerText.trim()) {
-                        result[field] = sib.innerText.trim();
-                        break;
-                    }
-                    // 祖父元素的下一兄弟
-                    const gp = par.parentElement;
-                    if (gp) {
-                        const gsib = gp.nextElementSibling;
-                        if (gsib && gsib.innerText.trim()) {
-                            result[field] = gsib.innerText.trim();
-                            break;
-                        }
-                    }
-                }
+        if page_text:
+            # 每个字段用宽松模式：字段名 + 冒号（中英文）+ 可选空格 + 值
+            patterns = {
+                '船长': r'船长[：:]\s*([\d.]+\s*m\b)',
+                '船宽': r'船宽[：:]\s*([\d.]+\s*m\b)',
+                '船型': r'船型[：:]\s*([^\n\r]{2,40})',
+                '吃水': r'吃水[：:]\s*([\d.]+\s*m\b)',
+                'IMO':  r'\bIMO[：:]\s*(\d{7,9})\b',
+                'MMSI': r'\bMMSI[：:]\s*(\d{9})\b',
+                '呼号': r'呼号[：:]\s*(\S+)',
+                '船籍': r'船籍[：:]\s*([^\n\r]{1,30})',
             }
-            return result;
-        """)
-        if isinstance(extracted, dict):
-            for k, v in extracted.items():
-                if v:
-                    result[k] = str(v).split("\n")[0].strip()
+            for field, pat in patterns.items():
+                m = re.search(pat, page_text)
+                if m:
+                    result[field] = m.group(1).strip()
+                    log.info(f"  正则命中: {field} = {result[field]!r}")
     except Exception as e:
-        log.warning(f"  JS 提取异常: {e}")
+        log.warning(f"  innerText 提取异常: {e}")
 
-    # XPath 兜底（只补充 JS 未取到的字段）
-    for field in TARGET_FIELDS + ["IMO"]:
-        if result.get(field):
-            continue
-        for xpath in [
-            f"xpath://*[normalize-space(text())='{field}：']/following-sibling::*[1]",
-            f"xpath://*[normalize-space(text())='{field}:']/following-sibling::*[1]",
-            f"xpath://*[normalize-space(text())='{field}']/../following-sibling::*[1]",
-            f"xpath://td[normalize-space(.)='{field}']/following-sibling::td[1]",
-        ]:
-            try:
-                el = page.ele(xpath, timeout=1)
-                if el:
-                    txt = el.text.strip().split("\n")[0].strip()
-                    if txt:
-                        result[field] = txt
-                        break
-            except Exception:
-                continue
+    # ── 备用策略：TreeWalker（补充正则未命中的字段）────────────────
+    missing = [f for f in TARGET_FIELDS + ["IMO"] if not result.get(f)]
+    if missing:
+        try:
+            dom_result = page.run_js(f"""
+                const targets = {missing};
+                const found = {{}};
+                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                let node;
+                while ((node = walker.nextNode())) {{
+                    const raw = node.textContent.trim();
+                    for (const field of targets) {{
+                        if (found[field]) continue;
+                        if (raw !== field && raw !== field+':' && raw !== field+'：') continue;
+                        const par = node.parentElement;
+                        if (!par) continue;
+                        for (const cand of [
+                            par.nextElementSibling,
+                            par.parentElement?.nextElementSibling,
+                            par.parentElement?.parentElement?.nextElementSibling,
+                        ]) {{
+                            if (cand) {{
+                                const v = (cand.innerText || '').trim().split('\\n')[0].trim();
+                                if (v && v.length < 60) {{ found[field] = v; break; }}
+                            }}
+                        }}
+                    }}
+                }}
+                return found;
+            """)
+            if isinstance(dom_result, dict):
+                for k, v in dom_result.items():
+                    if v and not result.get(k):
+                        result[k] = str(v).strip()
+                        log.info(f"  DOM 命中: {k} = {result[k]!r}")
+        except Exception as e:
+            log.warning(f"  DOM 提取异常: {e}")
 
     return result
 
@@ -401,13 +393,13 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
                 if btn:
                     btn.click()
                     log.info("  已点击「展开」")
-                    _jitter(0.5, 1.0)
+                    _jitter(2.0, 3.0)   # 等待展开动画和内容渲染完毕
                     break
             except Exception:
                 continue
 
         # ── 7. 提取字段 ───────────────────────────────────────────────
-        _jitter(0.5, 1.0)
+        _jitter(1.0, 1.5)
         extracted = _extract_fields(page)
         record.update(extracted)
 
