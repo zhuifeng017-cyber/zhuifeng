@@ -359,47 +359,54 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
             """)
 
         # 点击后等待面板渲染
-        _jitter(1.0, 1.8)
+        _jitter(1.5, 2.5)
         log.info(f"  点击后 URL: {page.url}")
 
-        # ── 5. 等待左侧面板出现「船长」字样（URL 不变，数据直接渲染在面板中）──
-        log.info("  等待船舶数据面板...")
         if not clicked_item:
-            # 没有成功点击候选项时才放弃
             log.warning("  候选项未点击，放弃")
             record["status"] = "no_navigate"
             return record
 
+        # ── 5. 点击「展开」按钮，展示船长/船宽/船型/吃水 ────────────────
+        # 页面默认折叠，展开后才能看到船舶参数。
+        # "展开"文字所在元素可能是 div/span/a，全部枚举。
+        expand_clicked = False
+        for sel in [
+            "xpath://div[normalize-space(text())='展开']",
+            "xpath://span[normalize-space(text())='展开']",
+            "xpath://a[normalize-space(text())='展开']",
+            "xpath://button[normalize-space(text())='展开']",
+            "xpath://*[normalize-space(text())='展开']",
+        ]:
+            try:
+                btn = page.ele(sel, timeout=2)
+                if btn:
+                    btn.click()
+                    expand_clicked = True
+                    log.info(f"  已点击「展开」({sel})")
+                    break
+            except Exception:
+                continue
+        if not expand_clicked:
+            log.info("  未找到「展开」按钮（可能已处于展开状态）")
+
+        # ── 6. 等待「船长」字样出现（展开后才可见）────────────────────
+        _jitter(1.0, 2.0)
         panel_ready = False
-        deadline = time.time() + 15
+        deadline = time.time() + 10
         while time.time() < deadline:
             try:
-                el = page.ele("xpath://*[normalize-space(text())='船长' or "
-                              "normalize-space(text())='船长：']", timeout=0.5)
+                el = page.ele("xpath://*[contains(text(),'船长')]", timeout=0.5)
                 if el:
                     panel_ready = True
                     break
             except Exception:
                 pass
             time.sleep(0.3)
-        log.info(f"  面板就绪: {panel_ready}")
-
-        # ── 6. 若存在「展开」按钮则点击（已展开时显示「收起」，无需再点）──────
-        for sel in ["xpath://span[normalize-space(text())='展开']",
-                    "xpath://a[normalize-space(text())='展开']",
-                    "tag:span@@text():展开"]:
-            try:
-                btn = page.ele(sel, timeout=2)
-                if btn:
-                    btn.click()
-                    log.info("  已点击「展开」")
-                    _jitter(2.0, 3.0)   # 等待展开动画和内容渲染完毕
-                    break
-            except Exception:
-                continue
+        log.info(f"  展开后面板就绪: {panel_ready}")
 
         # ── 7. 提取字段 ───────────────────────────────────────────────
-        _jitter(1.0, 1.5)
+        _jitter(0.5, 1.0)
         extracted = _extract_fields(page)
         record.update(extracted)
 
