@@ -250,37 +250,77 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
             record["status"] = "input_failed"
             return record
 
-        # ── 4. 等待自动补全下拉候选出现，点击第一条匹配结果 ────────────
-        log.info("  等待搜索候选下拉...")
+        # ── 4. 点击搜索按钮，再用 JS 位置检测点击下拉候选项 ─────────────
+        # 先点搜索框旁的蓝色放大镜按钮触发搜索
+        btn_result = search_box.run_js("""
+            let node = this.parentElement;
+            for (let i = 0; i < 8; i++) {
+                if (!node) break;
+                const btn = node.querySelector('button');
+                if (btn && btn.offsetParent !== null) {
+                    btn.click();
+                    return btn.className || 'clicked';
+                }
+                node = node.parentElement;
+            }
+            return null;
+        """)
+        log.info(f"  搜索按钮: {btn_result!r}")
         _jitter(0.8, 1.5)
 
-        dropdown_item = None
-        for attempt in range(10):
-            for sel in [
-                "xpath://div[contains(@class,'ant-select-item') and not(contains(@class,'empty'))]",
-                "xpath://li[contains(@class,'ant-select-dropdown-menu-item')]",
-                ".ant-select-item-option",
-                "xpath://div[contains(@class,'suggest')]//div[1]",
-                "xpath://div[contains(@class,'result-item')]//div[1]",
-            ]:
-                try:
-                    el = page.ele(sel, timeout=1)
-                    if el and el.text.strip():
-                        dropdown_item = el
-                        log.info(f"  找到候选项: {el.text.strip()[:60]!r}")
-                        break
-                except Exception:
-                    continue
-            if dropdown_item:
+        # 用 JS 找下拉候选项：先按类名，再按位置（搜索框正下方含船名的元素）
+        first_word = ship_name.upper().split()[0]
+        clicked_item = None
+
+        for attempt in range(15):
+            result = page.run_js(f"""
+                const kw = {repr(first_word)};
+                // 策略1：Ant Design / 常见下拉选项类名
+                const antSels = [
+                    '.ant-select-item-option', '.ant-select-item',
+                    '[class*="option-item"]', '[class*="search-item"]',
+                    '[class*="suggest-item"]', '[class*="result-item"]',
+                    '[class*="dropdown"] li', '[class*="popup"] li'
+                ];
+                for (const s of antSels) {{
+                    for (const el of document.querySelectorAll(s)) {{
+                        if (el.offsetParent !== null && el.textContent.includes(kw)) {{
+                            el.click();
+                            return 'cls:' + el.textContent.slice(0, 50).trim();
+                        }}
+                    }}
+                }}
+                // 策略2：位置检测——找搜索框（x<150）正下方含船名的可见元素
+                let inpBottom = 0;
+                for (const inp of document.querySelectorAll('input')) {{
+                    const r = inp.getBoundingClientRect();
+                    if (r.x < 150 && r.width > 50 && r.height > 0) {{
+                        inpBottom = r.bottom; break;
+                    }}
+                }}
+                if (inpBottom > 0) {{
+                    for (const el of document.querySelectorAll('li, div, span')) {{
+                        if (el.children.length > 5) continue;
+                        const text = el.textContent.trim();
+                        if (!text.startsWith(kw)) continue;
+                        const r = el.getBoundingClientRect();
+                        if (r.top > inpBottom && r.top < inpBottom + 300 &&
+                            r.width > 50 && r.height > 0 && r.height < 120) {{
+                            el.click();
+                            return 'pos:' + text.slice(0, 50);
+                        }}
+                    }}
+                }}
+                return null;
+            """)
+            if result:
+                clicked_item = result
+                log.info(f"  已点击候选项: {result!r}")
                 break
             _jitter(0.4, 0.8)
 
-        if dropdown_item:
-            dropdown_item.click()
-            log.info("  已点击候选项")
-        else:
-            # 兜底：发送 Enter 键触发搜索
-            log.warning("  未找到下拉候选，改用 Enter 键")
+        if not clicked_item:
+            log.warning("  未找到候选项，改用 Enter 键")
             search_box.run_js("""
                 this.dispatchEvent(new KeyboardEvent('keydown',
                     {key:'Enter', keyCode:13, bubbles:true, cancelable:true}));
