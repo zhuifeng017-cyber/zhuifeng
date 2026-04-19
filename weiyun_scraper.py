@@ -250,16 +250,55 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
             record["status"] = "input_failed"
             return record
 
-        # ── 4. 用真实鼠标点击下拉候选项 ──────────────────────────────────
-        # JS .click() 不触发 Vue 事件处理器，必须用 DrissionPage actions
-        # 模拟真实鼠标移动到候选项坐标后点击
+        # ── 4. 点击下拉候选项（三策略按优先级尝试）────────────────────
+        # 问题根源：JS el.click() 触发 isTrusted=false，Vue 路由不响应。
+        # 策略A：提取 Vue Router 渲染的 <a href> 直接 page.get() 导航（最可靠）
+        # 策略B：DrissionPage ele().click()——CDP Input.dispatchMouseEvent，isTrusted=true
+        # 策略C：page.actions 真实鼠标移动到坐标后点击
+
         first_word = ship_name.upper().split()[0]
         clicked_item = None
 
-        for attempt in range(15):
-            pos_info = page.run_js(f"""
+        for attempt in range(12):
+            # ── 策略 A：Vue Router <a href> 直接导航 ──
+            href_url = page.run_js("""
+                for (const a of document.querySelectorAll('a[href]')) {
+                    const h = a.href || '';
+                    if ((h.includes('shipLocate') || h.includes('/ship')) &&
+                        (h.includes('vn=') || h.includes('imo='))) {
+                        if (a.offsetParent !== null) return h;
+                    }
+                }
+                return null;
+            """)
+            if href_url:
+                log.info(f"  [A] Vue Router href 导航: {href_url[:80]}")
+                page.get(href_url, timeout=30)
+                clicked_item = href_url
+                break
+
+            # ── 策略 B：DrissionPage ele() CDP 原生 click ──
+            # 找包含船名 + 'IMO' 关键字的结果条目（两个字段并存 = 结果项特征）
+            for xpath in [
+                f"xpath://li[contains(.,'{first_word}') and contains(.,'IMO')]",
+                f"xpath://div[contains(.,'{first_word}') and contains(.,'IMO') and contains(.,'MMSI')][not(descendant::input)]",
+                f"xpath://a[contains(.,'{first_word}') and contains(.,'IMO')]",
+            ]:
+                try:
+                    el = page.ele(xpath, timeout=1)
+                    if el and el.text.strip():
+                        log.info(f"  [B] CDP click: {el.text.strip()[:50]!r}")
+                        el.click()
+                        clicked_item = el.text.strip()[:40]
+                        break
+                except Exception:
+                    continue
+            if clicked_item:
+                break
+
+            # ── 策略 C：位置检测 + page.actions 真实鼠标 ──
+            pos = page.run_js(f"""
                 const kw = {repr(first_word)};
-                // 找搜索框底部坐标（x<150，可见）
                 let inpBottom = 0;
                 for (const inp of document.querySelectorAll('input')) {{
                     const r = inp.getBoundingClientRect();
@@ -267,55 +306,72 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
                         inpBottom = r.bottom; break;
                     }}
                 }}
-                if (inpBottom === 0) return null;
-                // 找搜索框正下方包含船名的可见元素，返回其中心坐标
-                for (const el of document.querySelectorAll('li, div, span')) {{
-                    if (el.children.length > 5) continue;
+                if (!inpBottom) return null;
+                // 找最小面积且同时含船名+IMO 的可见元素（避免点到外层容器）
+                let best = null, bestArea = Infinity;
+                for (const el of document.querySelectorAll('li, a, div')) {{
                     const text = el.textContent.trim();
-                    if (!text.startsWith(kw)) continue;
+                    if (!text.includes(kw) || !text.includes('IMO')) continue;
                     const r = el.getBoundingClientRect();
-                    if (r.top > inpBottom && r.top < inpBottom + 400 &&
-                        r.width > 50 && r.height > 0 && r.height < 120) {{
-                        return {{x: r.left + r.width / 2,
-                                y: r.top  + r.height / 2,
+                    if (r.top < inpBottom || r.top > inpBottom + 400) continue;
+                    if (r.width < 50 || r.height < 5) continue;
+                    const area = r.width * r.height;
+                    if (area < bestArea) {{
+                        best = {{x: r.left + r.width / 2, y: r.top + r.height / 2,
                                 text: text.slice(0, 60)}};
+                        bestArea = area;
                     }}
                 }}
-                return null;
+                return best;
             """)
-
-            if pos_info and pos_info.get('x'):
-                cx, cy = int(pos_info['x']), int(pos_info['y'])
-                log.info(f"  候选项坐标: ({cx},{cy}) {pos_info.get('text','')[:40]!r}")
-                # 真实鼠标移动并点击，触发 Vue/JS 框架的 click 事件
+            if pos and pos.get('x'):
+                cx, cy = int(pos['x']), int(pos['y'])
+                log.info(f"  [C] 鼠标点击 ({cx},{cy}): {pos.get('text','')[:40]!r}")
                 page.actions.move_to((cx, cy))
-                time.sleep(0.15)
+                time.sleep(0.2)
                 page.actions.click()
-                clicked_item = pos_info.get('text', 'ok')
-                log.info("  已真实鼠标点击候选项")
+                clicked_item = pos.get('text', 'ok')
                 break
 
             _jitter(0.4, 0.8)
 
         if not clicked_item:
-            log.warning("  未找到候选项坐标，改用 Enter 键")
+            log.warning("  所有策略均失败，Enter 兜底")
             search_box.run_js("""
                 this.dispatchEvent(new KeyboardEvent('keydown',
                     {key:'Enter', keyCode:13, bubbles:true, cancelable:true}));
-                this.dispatchEvent(new KeyboardEvent('keyup',
-                    {key:'Enter', keyCode:13, bubbles:true, cancelable:true}));
             """)
 
-        # ── 5. 等待 URL 更新出现 vn= 参数（页面本身就在 /shipLocate，
-        #        需要等参数出现以确认已加载到具体船舶）────────────────────
-        log.info("  等待船舶详情 URL（vn= 参数）...")
-        arrived = _wait_for_url(page, "vn=", timeout=20)
+        # 点击后截图，方便确认状态
+        _jitter(0.5, 1.0)
+        page.get_screenshot(path=f"debug_{ship_name}_after_click.png")
+        log.info(f"  点击后 URL: {page.url}  (截图: debug_{ship_name}_after_click.png)")
+
+        # ── 5. 等待 URL 变化（vn= / imo= 出现，或 URL 从 base 改变）────────
+        log.info("  等待导航完成...")
+        arrived = False
+        base_url = f"{SITE}/shipLocate"
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            cur = page.url
+            if "vn=" in cur or "imo=" in cur:
+                arrived = True
+                break
+            if cur != base_url and "shipLocate" in cur:
+                # URL 有变化但参数格式不同（如 hash 路由）
+                arrived = True
+                break
+            time.sleep(0.3)
 
         if not arrived:
-            log.warning(f"  URL 未出现 vn= 参数，当前 URL: {page.url}")
-            page.get_screenshot(path=f"debug_{ship_name}.png", full_page=True)
-            record["status"] = "no_navigate"
-            return record
+            if clicked_item:
+                # 候选项已被点击但 URL 无变化——有些站点用 pushState 但参数名不同
+                # 继续尝试提取，不直接放弃
+                log.warning(f"  URL 无变化 ({page.url})，候选已点击，尝试提取数据")
+            else:
+                log.warning(f"  未导航，当前 URL: {page.url}")
+                record["status"] = "no_navigate"
+                return record
 
         log.info(f"  已到达: {page.url}")
         _jitter(1.5, 2.5)
