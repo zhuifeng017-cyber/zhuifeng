@@ -230,52 +230,84 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
             record["status"] = "input_failed"
             return record
 
-        # ── 4. 点击搜索按钮（图标按钮，无文字）──────────────────────────
-        # 用 JS 找 input 的下一个兄弟 button 或父级里的 button
-        clicked_btn = page.run_js("""
-            const inp = arguments[0];
-            // 先找同级 button（input 之后）
-            let sib = inp.nextElementSibling;
-            while (sib) {
-                if (sib.tagName === 'BUTTON') { sib.click(); return sib.className || 'button'; }
-                sib = sib.nextElementSibling;
-            }
-            // 再向上找父级里的 button
-            let node = inp.parentElement;
-            for (let i = 0; i < 5; i++) {
-                if (!node) break;
-                const btn = node.querySelector('button');
-                if (btn) { btn.click(); return btn.className || 'button'; }
-                node = node.parentElement;
-            }
-            return null;
-        """, search_box)
+        # ── 4. 等待自动补全下拉候选出现，点击第一条匹配结果 ────────────
+        log.info("  等待搜索候选下拉...")
+        _jitter(0.8, 1.5)
 
-        if clicked_btn:
-            log.info(f"  点击搜索按钮: {clicked_btn!r}")
+        dropdown_item = None
+        for attempt in range(10):
+            for sel in [
+                "xpath://div[contains(@class,'ant-select-item') and not(contains(@class,'empty'))]",
+                "xpath://li[contains(@class,'ant-select-dropdown-menu-item')]",
+                ".ant-select-item-option",
+                "xpath://div[contains(@class,'suggest')]//div[1]",
+                "xpath://div[contains(@class,'result-item')]//div[1]",
+            ]:
+                try:
+                    el = page.ele(sel, timeout=1)
+                    if el and el.text.strip():
+                        dropdown_item = el
+                        log.info(f"  找到候选项: {el.text.strip()[:60]!r}")
+                        break
+                except Exception:
+                    continue
+            if dropdown_item:
+                break
+            _jitter(0.4, 0.8)
+
+        if dropdown_item:
+            dropdown_item.click()
+            log.info("  已点击候选项")
         else:
-            # 兜底：Enter 键
+            # 兜底：发送 Enter 键触发搜索
+            log.warning("  未找到下拉候选，改用 Enter 键")
             search_box.run_js("""
                 this.dispatchEvent(new KeyboardEvent('keydown',
                     {key:'Enter', keyCode:13, bubbles:true, cancelable:true}));
+                this.dispatchEvent(new KeyboardEvent('keyup',
+                    {key:'Enter', keyCode:13, bubbles:true, cancelable:true}));
             """)
-            log.info("  JS Enter 兜底")
 
-        # ── 5. 等待跳转到带参数的 shipLocate 详情页 ──────────────────
-        log.info(f"  等待 shipLocate 详情页加载（最多 20s）...")
-        arrived = _wait_for_url(page, "shipLocate", timeout=20)
+        # ── 5. 等待 URL 更新出现 vn= 参数（页面本身就在 /shipLocate，
+        #        需要等参数出现以确认已加载到具体船舶）────────────────────
+        log.info("  等待船舶详情 URL（vn= 参数）...")
+        arrived = _wait_for_url(page, "vn=", timeout=20)
 
         if not arrived:
-            log.warning(f"  未到达 shipLocate，当前 URL: {page.url}")
+            log.warning(f"  URL 未出现 vn= 参数，当前 URL: {page.url}")
             page.get_screenshot(path=f"debug_{ship_name}.png", full_page=True)
             record["status"] = "no_navigate"
             return record
 
         log.info(f"  已到达: {page.url}")
-        _jitter(1.5, 2.5)       # 等待页面完全渲染
-        _jitter(1.0, 2.0)
+        _jitter(1.5, 2.5)
 
-        # ── 6. 提取字段 ───────────────────────────────────────────────
+        # ── 6. 点击「展开」按钮，展开船舶详细参数 ────────────────────────
+        log.info("  查找「展开」按钮...")
+        expand_clicked = False
+        for sel in [
+            "xpath://span[normalize-space(text())='展开']",
+            "xpath://a[normalize-space(text())='展开']",
+            "xpath://div[normalize-space(text())='展开']",
+            "xpath://button[contains(.,'展开')]",
+            "tag:span@@text():展开",
+            "tag:a@@text():展开",
+        ]:
+            try:
+                btn = page.ele(sel, timeout=3)
+                if btn:
+                    btn.click()
+                    log.info(f"  已点击「展开」按钮 (sel={sel!r})")
+                    expand_clicked = True
+                    _jitter(0.8, 1.5)
+                    break
+            except Exception:
+                continue
+        if not expand_clicked:
+            log.warning("  未找到「展开」按钮，直接提取当前页面数据")
+
+        # ── 7. 提取字段 ───────────────────────────────────────────────
+        _jitter(1.0, 2.0)
         extracted = _extract_fields(page)
         record.update(extracted)
 
