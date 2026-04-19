@@ -37,7 +37,7 @@ logging.basicConfig(
 )
 
 SITE = "https://www.weiyun001.com"
-TARGET_FIELDS = ["船长", "船宽", "船型", "吃水"]
+TARGET_FIELDS = ["IMO", "MMSI", "呼号", "船籍", "船长", "年份", "船宽", "船型", "吃水", "航速", "经度", "纬度"]
 
 
 # ---------------------------------------------------------------------------
@@ -95,16 +95,19 @@ def _extract_fields(page: ChromiumPage) -> dict:
         log.info(f"  页面文本(前600字): {page_text[:600]!r}")
 
         if page_text:
-            # 每个字段用宽松模式：字段名 + 冒号（中英文）+ 可选空格 + 值
             patterns = {
-                '船长': r'船长[：:]\s*([\d.]+\s*m\b)',
-                '船宽': r'船宽[：:]\s*([\d.]+\s*m\b)',
-                '船型': r'船型[：:]\s*([^\n\r]{2,40})',
-                '吃水': r'吃水[：:]\s*([\d.]+\s*m\b)',
                 'IMO':  r'\bIMO[：:]\s*(\d{7,9})\b',
                 'MMSI': r'\bMMSI[：:]\s*(\d{9})\b',
                 '呼号': r'呼号[：:]\s*(\S+)',
                 '船籍': r'船籍[：:]\s*([^\n\r]{1,30})',
+                '船长': r'船长[：:]\s*([\d.]+\s*m\b)',
+                '年份': r'年份[：:]\s*(\d{4})\b',
+                '船宽': r'船宽[：:]\s*([\d.]+\s*m\b)',
+                '船型': r'船型[：:]\s*([^\n\r]{2,40})',
+                '吃水': r'吃水[：:]\s*([\d.]+\s*m\b)',
+                '航速': r'航速[：:]\s*([\d.]+\s*节?\b)',
+                '经度': r'经度[：:]\s*([^\n\r]{3,25})',
+                '纬度': r'纬度[：:]\s*([^\n\r]{3,25})',
             }
             for field, pat in patterns.items():
                 m = re.search(pat, page_text)
@@ -115,7 +118,7 @@ def _extract_fields(page: ChromiumPage) -> dict:
         log.warning(f"  innerText 提取异常: {e}")
 
     # ── 备用策略：TreeWalker（补充正则未命中的字段）────────────────
-    missing = [f for f in TARGET_FIELDS + ["IMO"] if not result.get(f)]
+    missing = [f for f in TARGET_FIELDS if not result.get(f)]
     if missing:
         try:
             dom_result = page.run_js(f"""
@@ -160,11 +163,9 @@ def _extract_fields(page: ChromiumPage) -> dict:
 # ---------------------------------------------------------------------------
 
 def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
-    record: dict = {
-        "ship_name": ship_name,
-        "船长": None, "船宽": None, "船型": None, "吃水": None,
-        "IMO": None, "status": "pending",
-    }
+    record: dict = {"ship_name": ship_name, "status": "pending"}
+    for f in TARGET_FIELDS:
+        record[f] = None
 
     try:
         # ── 1. 直接打开船舶定位搜索页 ────────────────────────────────
@@ -628,8 +629,9 @@ def run(ship_names: list[str], output: str, port: int) -> pd.DataFrame:
             rec = scrape_one(page, name)
             results.append(rec)
             log.info(
-                f"  船长={rec['船长']}  船宽={rec['船宽']}  "
-                f"船型={rec['船型']}  吃水={rec['吃水']}  [{rec['status']}]"
+                f"  IMO={rec.get('IMO')}  船长={rec.get('船长')}  船宽={rec.get('船宽')}  "
+                f"船型={rec.get('船型')}  吃水={rec.get('吃水')}  "
+                f"航速={rec.get('航速')}  [{rec['status']}]"
             )
             # 每条都增量保存（文件被占用时自动换名）
             _safe_save(pd.DataFrame(results), output)
