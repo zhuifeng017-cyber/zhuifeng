@@ -183,7 +183,7 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
         # ── 3. 找输入框并填入船名 ─────────────────────────────────────
         _jitter(1.5, 2.5)
 
-        # 先列出页面上所有输入框，帮助定位正确元素
+        # 打印页面所有输入框，便于调试选择器
         all_inputs = page.run_js("""
             return JSON.stringify(Array.from(document.querySelectorAll('input')).map(el => ({
                 ph:   el.placeholder,
@@ -195,14 +195,16 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
         log.info(f"  页面输入框列表: {all_inputs}")
 
         # 船舶定位页的搜索框是 Ant Design Input，class = ant-input
-        # （通过日志确认 placeholder = '请输入搜索内容'，type=text，cls=ant-input）
+        # 船舶定位搜索框 placeholder 含"英文船名/IMO/MMSI"，优先用精确 XPath 匹配，
+        # 避免误选顶部导航栏的 ant-input（placeholder="请输入搜索内容"）
         search_box = None
         for sel in [
-            ".ant-input",                                          # Ant Design Input 组件
             "xpath://input[contains(@placeholder,'英文船名')]",
             "xpath://input[contains(@placeholder,'MMSI')]",
+            "xpath://input[contains(@placeholder,'IMO')]",
             "xpath://input[contains(@placeholder,'船名')]",
-            "xpath://input[@type='text' and not(@id)]",           # 无 id 的文本框
+            # 兜底：取 ant-input 中 placeholder 含"搜索"之外的那个
+            "xpath://input[contains(@class,'ant-input') and not(contains(@placeholder,'搜索内容'))]",
         ]:
             try:
                 el = page.ele(sel, timeout=3)
