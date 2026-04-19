@@ -83,48 +83,72 @@ def _wait_for_url(page: ChromiumPage, keyword: str, timeout: float = 20.0) -> bo
 
 def _extract_fields(page: ChromiumPage) -> dict:
     """
-    从已加载的 shipLocate 页面提取目标字段。
-    策略1：JS TreeWalker 找标签文字，取其相邻节点值。
-    策略2：XPath 找标签后的兄弟元素。
+    从船舶定位左侧面板提取目标字段。
+    页面布局：label（含冒号）+ 同级 value，例如「船长：」→ 「186m」
     """
     result: dict = {}
 
-    for field in TARGET_FIELDS + ["IMO"]:
-        # 策略 1：TreeWalker
-        try:
-            val = page.run_js(
-                """(field) => {
-                    const walker = document.createTreeWalker(
-                        document.body, NodeFilter.SHOW_TEXT);
-                    let node;
-                    while ((node = walker.nextNode())) {
-                        const txt = node.textContent.trim();
-                        if (txt === field || txt === field + ':' || txt === field + '：') {
-                            // 尝试父元素的下一兄弟
-                            const par = node.parentElement;
-                            if (par.nextElementSibling)
-                                return par.nextElementSibling.innerText.trim();
-                            // 尝试祖父元素的下一兄弟
-                            if (par.parentElement?.nextElementSibling)
-                                return par.parentElement.nextElementSibling.innerText.trim();
+    # 一次性用 JS 遍历所有 label:value，覆盖所有目标字段
+    try:
+        extracted = page.run_js("""
+            const targets = ['船长', '船宽', '船型', '吃水', 'IMO', 'MMSI', '呼号', '船籍'];
+            const result = {};
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            let node;
+            while ((node = walker.nextNode())) {
+                const raw = node.textContent.trim();
+                for (const field of targets) {
+                    if (result[field]) continue;
+                    // 匹配 "船长" / "船长:" / "船长：" / "IMO:" / "IMO："
+                    const isMatch = raw === field ||
+                        raw === field + ':' || raw === field + '：' ||
+                        raw.startsWith(field + ':') || raw.startsWith(field + '：');
+                    if (!isMatch) continue;
+
+                    const par = node.parentElement;
+                    if (!par) continue;
+
+                    // 同一文本节点内含冒号（如 "船长: 186m"）
+                    const colonIdx = Math.max(raw.indexOf(':'), raw.indexOf('：'));
+                    if (colonIdx >= 0 && colonIdx < raw.length - 1) {
+                        result[field] = raw.slice(colonIdx + 1).trim();
+                        break;
+                    }
+                    // 父元素的下一兄弟
+                    const sib = par.nextElementSibling;
+                    if (sib && sib.innerText.trim()) {
+                        result[field] = sib.innerText.trim();
+                        break;
+                    }
+                    // 祖父元素的下一兄弟
+                    const gp = par.parentElement;
+                    if (gp) {
+                        const gsib = gp.nextElementSibling;
+                        if (gsib && gsib.innerText.trim()) {
+                            result[field] = gsib.innerText.trim();
+                            break;
                         }
                     }
-                    return null;
-                }""",
-                field,
-            )
-            if val:
-                result[field] = str(val).split("\n")[0].strip()
-                continue
-        except Exception:
-            pass
+                }
+            }
+            return result;
+        """)
+        if isinstance(extracted, dict):
+            for k, v in extracted.items():
+                if v:
+                    result[k] = str(v).split("\n")[0].strip()
+    except Exception as e:
+        log.warning(f"  JS 提取异常: {e}")
 
-        # 策略 2：XPath
+    # XPath 兜底（只补充 JS 未取到的字段）
+    for field in TARGET_FIELDS + ["IMO"]:
+        if result.get(field):
+            continue
         for xpath in [
+            f"xpath://*[normalize-space(text())='{field}：']/following-sibling::*[1]",
+            f"xpath://*[normalize-space(text())='{field}:']/following-sibling::*[1]",
+            f"xpath://*[normalize-space(text())='{field}']/../following-sibling::*[1]",
             f"xpath://td[normalize-space(.)='{field}']/following-sibling::td[1]",
-            f"xpath://span[normalize-space(.)='{field}']/following-sibling::span[1]",
-            f"xpath://div[normalize-space(.)='{field}']/following-sibling::div[1]",
-            f"xpath://*[normalize-space(.)='{field}']/../following-sibling::*[1]",
         ]:
             try:
                 el = page.ele(xpath, timeout=1)
@@ -342,66 +366,48 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
                     {key:'Enter', keyCode:13, bubbles:true, cancelable:true}));
             """)
 
-        # 点击后截图，方便确认状态
-        _jitter(0.5, 1.0)
-        page.get_screenshot(path=f"debug_{ship_name}_after_click.png")
-        log.info(f"  点击后 URL: {page.url}  (截图: debug_{ship_name}_after_click.png)")
+        # 点击后等待面板渲染
+        _jitter(1.0, 1.8)
+        log.info(f"  点击后 URL: {page.url}")
 
-        # ── 5. 等待 URL 变化（vn= / imo= 出现，或 URL 从 base 改变）────────
-        log.info("  等待导航完成...")
-        arrived = False
-        base_url = f"{SITE}/shipLocate"
-        deadline = time.time() + 25
+        # ── 5. 等待左侧面板出现「船长」字样（URL 不变，数据直接渲染在面板中）──
+        log.info("  等待船舶数据面板...")
+        if not clicked_item:
+            # 没有成功点击候选项时才放弃
+            log.warning("  候选项未点击，放弃")
+            record["status"] = "no_navigate"
+            return record
+
+        panel_ready = False
+        deadline = time.time() + 15
         while time.time() < deadline:
-            cur = page.url
-            if "vn=" in cur or "imo=" in cur:
-                arrived = True
-                break
-            if cur != base_url and "shipLocate" in cur:
-                # URL 有变化但参数格式不同（如 hash 路由）
-                arrived = True
-                break
-            time.sleep(0.3)
-
-        if not arrived:
-            if clicked_item:
-                # 候选项已被点击但 URL 无变化——有些站点用 pushState 但参数名不同
-                # 继续尝试提取，不直接放弃
-                log.warning(f"  URL 无变化 ({page.url})，候选已点击，尝试提取数据")
-            else:
-                log.warning(f"  未导航，当前 URL: {page.url}")
-                record["status"] = "no_navigate"
-                return record
-
-        log.info(f"  已到达: {page.url}")
-        _jitter(1.5, 2.5)
-
-        # ── 6. 点击「展开」按钮，展开船舶详细参数 ────────────────────────
-        log.info("  查找「展开」按钮...")
-        expand_clicked = False
-        for sel in [
-            "xpath://span[normalize-space(text())='展开']",
-            "xpath://a[normalize-space(text())='展开']",
-            "xpath://div[normalize-space(text())='展开']",
-            "xpath://button[contains(.,'展开')]",
-            "tag:span@@text():展开",
-            "tag:a@@text():展开",
-        ]:
             try:
-                btn = page.ele(sel, timeout=3)
+                el = page.ele("xpath://*[normalize-space(text())='船长' or "
+                              "normalize-space(text())='船长：']", timeout=0.5)
+                if el:
+                    panel_ready = True
+                    break
+            except Exception:
+                pass
+            time.sleep(0.3)
+        log.info(f"  面板就绪: {panel_ready}")
+
+        # ── 6. 若存在「展开」按钮则点击（已展开时显示「收起」，无需再点）──────
+        for sel in ["xpath://span[normalize-space(text())='展开']",
+                    "xpath://a[normalize-space(text())='展开']",
+                    "tag:span@@text():展开"]:
+            try:
+                btn = page.ele(sel, timeout=2)
                 if btn:
                     btn.click()
-                    log.info(f"  已点击「展开」按钮 (sel={sel!r})")
-                    expand_clicked = True
-                    _jitter(0.8, 1.5)
+                    log.info("  已点击「展开」")
+                    _jitter(0.5, 1.0)
                     break
             except Exception:
                 continue
-        if not expand_clicked:
-            log.warning("  未找到「展开」按钮，直接提取当前页面数据")
 
         # ── 7. 提取字段 ───────────────────────────────────────────────
-        _jitter(1.0, 2.0)
+        _jitter(0.5, 1.0)
         extracted = _extract_fields(page)
         record.update(extracted)
 
