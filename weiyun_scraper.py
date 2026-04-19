@@ -250,47 +250,16 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
             record["status"] = "input_failed"
             return record
 
-        # ── 4. 点击搜索按钮，再用 JS 位置检测点击下拉候选项 ─────────────
-        # 先点搜索框旁的蓝色放大镜按钮触发搜索
-        btn_result = search_box.run_js("""
-            let node = this.parentElement;
-            for (let i = 0; i < 8; i++) {
-                if (!node) break;
-                const btn = node.querySelector('button');
-                if (btn && btn.offsetParent !== null) {
-                    btn.click();
-                    return btn.className || 'clicked';
-                }
-                node = node.parentElement;
-            }
-            return null;
-        """)
-        log.info(f"  搜索按钮: {btn_result!r}")
-        _jitter(0.8, 1.5)
-
-        # 用 JS 找下拉候选项：先按类名，再按位置（搜索框正下方含船名的元素）
+        # ── 4. 用真实鼠标点击下拉候选项 ──────────────────────────────────
+        # JS .click() 不触发 Vue 事件处理器，必须用 DrissionPage actions
+        # 模拟真实鼠标移动到候选项坐标后点击
         first_word = ship_name.upper().split()[0]
         clicked_item = None
 
         for attempt in range(15):
-            result = page.run_js(f"""
+            pos_info = page.run_js(f"""
                 const kw = {repr(first_word)};
-                // 策略1：Ant Design / 常见下拉选项类名
-                const antSels = [
-                    '.ant-select-item-option', '.ant-select-item',
-                    '[class*="option-item"]', '[class*="search-item"]',
-                    '[class*="suggest-item"]', '[class*="result-item"]',
-                    '[class*="dropdown"] li', '[class*="popup"] li'
-                ];
-                for (const s of antSels) {{
-                    for (const el of document.querySelectorAll(s)) {{
-                        if (el.offsetParent !== null && el.textContent.includes(kw)) {{
-                            el.click();
-                            return 'cls:' + el.textContent.slice(0, 50).trim();
-                        }}
-                    }}
-                }}
-                // 策略2：位置检测——找搜索框（x<150）正下方含船名的可见元素
+                // 找搜索框底部坐标（x<150，可见）
                 let inpBottom = 0;
                 for (const inp of document.querySelectorAll('input')) {{
                     const r = inp.getBoundingClientRect();
@@ -298,29 +267,38 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
                         inpBottom = r.bottom; break;
                     }}
                 }}
-                if (inpBottom > 0) {{
-                    for (const el of document.querySelectorAll('li, div, span')) {{
-                        if (el.children.length > 5) continue;
-                        const text = el.textContent.trim();
-                        if (!text.startsWith(kw)) continue;
-                        const r = el.getBoundingClientRect();
-                        if (r.top > inpBottom && r.top < inpBottom + 300 &&
-                            r.width > 50 && r.height > 0 && r.height < 120) {{
-                            el.click();
-                            return 'pos:' + text.slice(0, 50);
-                        }}
+                if (inpBottom === 0) return null;
+                // 找搜索框正下方包含船名的可见元素，返回其中心坐标
+                for (const el of document.querySelectorAll('li, div, span')) {{
+                    if (el.children.length > 5) continue;
+                    const text = el.textContent.trim();
+                    if (!text.startsWith(kw)) continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.top > inpBottom && r.top < inpBottom + 400 &&
+                        r.width > 50 && r.height > 0 && r.height < 120) {{
+                        return {{x: r.left + r.width / 2,
+                                y: r.top  + r.height / 2,
+                                text: text.slice(0, 60)}};
                     }}
                 }}
                 return null;
             """)
-            if result:
-                clicked_item = result
-                log.info(f"  已点击候选项: {result!r}")
+
+            if pos_info and pos_info.get('x'):
+                cx, cy = int(pos_info['x']), int(pos_info['y'])
+                log.info(f"  候选项坐标: ({cx},{cy}) {pos_info.get('text','')[:40]!r}")
+                # 真实鼠标移动并点击，触发 Vue/JS 框架的 click 事件
+                page.actions.move_to((cx, cy))
+                time.sleep(0.15)
+                page.actions.click()
+                clicked_item = pos_info.get('text', 'ok')
+                log.info("  已真实鼠标点击候选项")
                 break
+
             _jitter(0.4, 0.8)
 
         if not clicked_item:
-            log.warning("  未找到候选项，改用 Enter 键")
+            log.warning("  未找到候选项坐标，改用 Enter 键")
             search_box.run_js("""
                 this.dispatchEvent(new KeyboardEvent('keydown',
                     {key:'Enter', keyCode:13, bubbles:true, cancelable:true}));
