@@ -95,19 +95,21 @@ def _extract_fields(page: ChromiumPage) -> dict:
         log.info(f"  页面文本(前600字): {page_text[:600]!r}")
 
         if page_text:
+            # \s* before [：:] handles labels like "吃水 ：" (space before colon)
+            # \s* after  [：:] handles label\nvalue on separate lines
             patterns = {
-                'IMO':  r'\bIMO[：:]\s*(\d{7,9})\b',
-                'MMSI': r'\bMMSI[：:]\s*(\d{9})\b',
-                '呼号': r'呼号[：:]\s*(\S+)',
-                '船籍': r'船籍[：:]\s*([^\n\r]{1,30})',
-                '船长': r'船长[：:]\s*([\d.]+\s*m\b)',
-                '年份': r'年份[：:]\s*(\d{4})\b',
-                '船宽': r'船宽[：:]\s*([\d.]+\s*m\b)',
-                '船型': r'船型[：:]\s*([^\n\r]{2,40})',
-                '吃水': r'吃水[：:]\s*([\d.]+\s*m\b)',
-                '航速': r'航速[：:]\s*([\d.]+\s*节?\b)',
-                '经度': r'经度[：:]\s*([^\n\r]{3,25})',
-                '纬度': r'纬度[：:]\s*([^\n\r]{3,25})',
+                'IMO':  r'\bIMO\s*[：:]\s*(\d{7,9})\b',
+                'MMSI': r'\bMMSI\s*[：:]\s*(\d{9})\b',
+                '呼号': r'呼号\s*[：:]\s*(\S+)',
+                '船籍': r'船籍\s*[：:]\s*([^\n\r]{1,30})',
+                '船长': r'船长\s*[：:]\s*([\d.]+\s*m\b)',
+                '年份': r'年份\s*[：:]\s*(\d{4})\b',
+                '船宽': r'船宽\s*[：:]\s*([\d.]+\s*m\b)',
+                '船型': r'船型\s*[：:]\s*([^\n\r]{2,40})',
+                '吃水': r'吃水\s*[：:]\s*([\d.]+\s*m\b)',
+                '航速': r'航速\s*[：:]\s*([\d.]+\s*节?\b)',
+                '经度': r'经度\s*[：:]\s*([^\n\r]{3,25})',
+                '纬度': r'纬度\s*[：:]\s*([^\n\r]{3,25})',
             }
             for field, pat in patterns.items():
                 m = re.search(pat, page_text)
