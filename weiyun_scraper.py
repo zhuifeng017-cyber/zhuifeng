@@ -183,37 +183,55 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
         # ── 3. 找输入框并填入船名 ─────────────────────────────────────
         _jitter(1.5, 2.5)
 
-        # 打印页面所有输入框，便于调试选择器
-        all_inputs = page.run_js("""
-            return JSON.stringify(Array.from(document.querySelectorAll('input')).map(el => ({
-                ph:   el.placeholder,
-                type: el.type,
-                id:   el.id,
-                cls:  el.className.slice(0, 60)
-            })));
+        # 打印所有输入框的位置信息（含坐标），便于调试
+        inputs_json = page.run_js("""
+            return JSON.stringify(Array.from(document.querySelectorAll('input')).map((el, i) => {
+                const r = el.getBoundingClientRect();
+                return {i, ph: el.placeholder, type: el.type, id: el.id,
+                        cls: el.className.slice(0, 60),
+                        x: Math.round(r.x), y: Math.round(r.y),
+                        w: Math.round(r.width), h: Math.round(r.height)};
+            }));
         """)
-        log.info(f"  页面输入框列表: {all_inputs}")
+        log.info(f"  页面输入框列表: {inputs_json}")
 
-        # 船舶定位页的搜索框是 Ant Design Input，class = ant-input
-        # 船舶定位搜索框 placeholder 含"英文船名/IMO/MMSI"，优先用精确 XPath 匹配，
-        # 避免误选顶部导航栏的 ant-input（placeholder="请输入搜索内容"）
+        # 船舶定位搜索框在左侧面板（宽约 180px 的侧栏），x 坐标 < 250。
+        # 全站搜索框在页面中央，x > 300。顶部导航搜索框通常不可见（w=0）。
+        # 用坐标定位，避免 class/placeholder 匹配到错误元素。
         search_box = None
-        for sel in [
-            "xpath://input[contains(@placeholder,'英文船名')]",
-            "xpath://input[contains(@placeholder,'MMSI')]",
-            "xpath://input[contains(@placeholder,'IMO')]",
-            "xpath://input[contains(@placeholder,'船名')]",
-            # 兜底：取 ant-input 中 placeholder 含"搜索"之外的那个
-            "xpath://input[contains(@class,'ant-input') and not(contains(@placeholder,'搜索内容'))]",
-        ]:
-            try:
-                el = page.ele(sel, timeout=3)
-                if el:
-                    search_box = el
-                    log.info(f"  找到输入框: placeholder={el.attr('placeholder')!r} cls={el.attr('class')!r}")
-                    break
-            except Exception:
-                continue
+        try:
+            import json as _json
+            inputs_data = _json.loads(inputs_json)
+            # 筛选：可见（h > 0, w > 50）且在左侧（x < 250）
+            candidates = [it for it in inputs_data
+                          if it.get('h', 0) > 0 and it.get('w', 0) > 50 and it.get('x', 999) < 250]
+            if candidates:
+                target_idx = candidates[0]['i']
+                all_els = page.eles("tag:input", timeout=3)
+                if target_idx < len(all_els):
+                    search_box = all_els[target_idx]
+                    log.info(f"  按坐标选定左侧输入框[{target_idx}]: "
+                             f"x={candidates[0]['x']} ph={candidates[0]['ph']!r}")
+        except Exception as e:
+            log.warning(f"  坐标筛选异常: {e}")
+
+        # 兜底：按 placeholder 关键词匹配
+        if not search_box:
+            for sel in [
+                "xpath://input[contains(@placeholder,'英文船名')]",
+                "xpath://input[contains(@placeholder,'MMSI')]",
+                "xpath://input[contains(@placeholder,'IMO')]",
+                "xpath://input[contains(@placeholder,'船名')]",
+                "xpath://input[contains(@placeholder,'搜索内容')]",
+            ]:
+                try:
+                    el = page.ele(sel, timeout=3)
+                    if el:
+                        search_box = el
+                        log.info(f"  兜底找到输入框: placeholder={el.attr('placeholder')!r}")
+                        break
+                except Exception:
+                    continue
 
         if not search_box:
             log.warning(f"[{ship_name}] 未找到搜索输入框 → 截图")
