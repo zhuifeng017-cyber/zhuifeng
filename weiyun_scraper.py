@@ -368,27 +368,49 @@ def scrape_one(page: ChromiumPage, ship_name: str) -> dict:
             return record
 
         # ── 5. 点击「展开」按钮，展示船长/船宽/船型/吃水 ────────────────
-        # 页面默认折叠，展开后才能看到船舶参数。
-        # "展开"文字所在元素可能是 div/span/a，全部枚举。
+        # 方法A: JS 定位「展开」坐标 → page.actions 真实鼠标点击（最可靠）
         expand_clicked = False
-        for sel in [
-            "xpath://div[normalize-space(text())='展开']",
-            "xpath://span[normalize-space(text())='展开']",
-            "xpath://a[normalize-space(text())='展开']",
-            "xpath://button[normalize-space(text())='展开']",
-            "xpath://*[normalize-space(text())='展开']",
-        ]:
-            try:
-                btn = page.ele(sel, timeout=2)
-                if btn:
-                    btn.click()
-                    expand_clicked = True
-                    log.info(f"  已点击「展开」({sel})")
-                    break
-            except Exception:
-                continue
+        expand_pos = page.run_js("""
+            for (const el of document.querySelectorAll('*')) {
+                const text = (el.childNodes.length === 1 &&
+                    el.firstChild.nodeType === 3)
+                    ? el.firstChild.textContent.trim() : '';
+                if (text !== '展开') continue;
+                if (!el.offsetParent) continue;
+                const r = el.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0)
+                    return {x: r.left + r.width/2, y: r.top + r.height/2,
+                            tag: el.tagName, cls: el.className.slice(0,40)};
+            }
+            return null;
+        """)
+        if expand_pos and expand_pos.get('x'):
+            cx, cy = int(expand_pos['x']), int(expand_pos['y'])
+            log.info(f"  展开按钮位置: ({cx},{cy}) "
+                     f"<{expand_pos.get('tag','')} class={expand_pos.get('cls','')!r}>")
+            page.actions.move_to((cx, cy))
+            time.sleep(0.2)
+            page.actions.click()
+            expand_clicked = True
+            log.info("  已真实鼠标点击「展开」")
+        else:
+            # 方法B: DrissionPage ele().click() CDP 点击
+            for sel in [
+                "xpath://div[normalize-space(text())='展开']",
+                "xpath://span[normalize-space(text())='展开']",
+                "xpath://*[normalize-space(text())='展开']",
+            ]:
+                try:
+                    btn = page.ele(sel, timeout=2)
+                    if btn:
+                        btn.click()
+                        expand_clicked = True
+                        log.info(f"  CDP 点击「展开」({sel})")
+                        break
+                except Exception:
+                    continue
         if not expand_clicked:
-            log.info("  未找到「展开」按钮（可能已处于展开状态）")
+            log.warning("  未找到「展开」按钮")
 
         # ── 6. 等待「船长」字样出现（展开后才可见）────────────────────
         _jitter(1.0, 2.0)
